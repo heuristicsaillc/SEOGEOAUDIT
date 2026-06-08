@@ -1,0 +1,28 @@
+# --- Web framework + server ---
+fastapi==0.115.6            # JSON API + serves the built React frontend
+uvicorn[standard]==0.34.0  # ASGI server that runs the FastAPI app
+
+# --- Async HTTP + parsing ---
+httpx[http2]==0.28.1       # Async HTTP client (HTTP/2 enabled to report the negotiated protocol)
+beautifulsoup4==4.12.3     # HTML parsing
+lxml==5.3.0                # Fast parser backend for BeautifulSoup
+playwright==1.49.1         # Headless browser used to render JS-heavy pages
+
+# --- Configuration ---
+pydantic==2.10.4           # Typed models for requests, results and reports
+pydantic-settings==2.7.1   # Loads configuration from the .env file
+python-dotenv==1.0.1       # Ensures the .env is discovered when run standalone
+
+# --- Google APIs (PageSpeed via REST httpx; GA4/GSC via SDK) ---
+google-api-python-client==2.157.0  # Search Console (GSC) client
+google-auth==2.37.0                # Service-account auth for GA4 + GSC
+google-auth-oauthlib==1.2.1        # OAuth desktop flow for personal Google account GSC/GA4
+google-analytics-data==0.18.16     # GA4 Data API client
+
+# --- LLM providers ---
+# Gemini is accessed through its OpenAI-compatible endpoint (see .env GEMINI_BASE_URL),
+# so a single OpenAI SDK serves both Gemini (primary judgement) and OpenAI (citation checks).
+openai==1.59.5            # Async client for Gemini (OpenAI-compatible) + OpenAI
+
+# --- PDF export ---
+reportlab==4.2.5          # Generate downloadable SEO/GEO report PDFs

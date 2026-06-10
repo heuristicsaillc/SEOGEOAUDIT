@@ -439,6 +439,16 @@ class Ga4Client:
         except Exception:  # Any error
             return {}  # Degrade gracefully
 
+    @staticmethod
+    def _page_path_variants(page_path: str) -> list[str]:
+        """Path forms GA4 may use (/ vs trailing slash)."""
+        path = page_path or "/"
+        variants: list[str] = []
+        for candidate in (path, path.rstrip("/") or "/", path.rstrip("/") + "/"):
+            if candidate and candidate not in variants:
+                variants.append(candidate)
+        return variants
+
     def _engagement_sync(self, property_id: str, page_path: str) -> dict:
         """Blocking runReport for engagement metrics on a single page path."""
         from google.analytics.data_v1beta import BetaAnalyticsDataClient  # GA4 client
@@ -454,30 +464,31 @@ class Ga4Client:
         if creds is None:  # Should not happen when enabled=True
             raise RuntimeError("Google credentials not configured")
         client = BetaAnalyticsDataClient(credentials=creds)  # Authenticated GA4 client
-        request = RunReportRequest(  # Build the report request
-            property=f"properties/{property_id}",  # Target GA4 property
-            date_ranges=[DateRange(start_date="28daysAgo", end_date="yesterday")],  # Recent window
-            dimensions=[Dimension(name="pagePath")],  # Group by page path
-            metrics=[  # Engagement metrics of interest
-                Metric(name="averageSessionDuration"),  # Dwell-time proxy
-                Metric(name="bounceRate"),  # Bounce rate per page
-                Metric(name="engagementRate"),  # Used to derive pogo-sticking risk
-            ],
-            dimension_filter=FilterExpression(  # Restrict to the requested page path
-                filter=Filter(
-                    field_name="pagePath",
-                    string_filter=Filter.StringFilter(value=page_path),  # Exact path match
-                )
-            ),
-            limit=1,  # Only this page's row
-        )
-        response = client.run_report(request)  # Execute the report
-        if not response.rows:  # No data for this page
-            return {}  # Nothing to report
-        row = response.rows[0]  # First (only) row
-        names = [m.name for m in response.metric_headers]  # Metric names in order
-        values = [v.value for v in row.metric_values]  # Corresponding values
-        return dict(zip(names, values))  # name -> value mapping
+        for path in self._page_path_variants(page_path):
+            request = RunReportRequest(  # Build the report request
+                property=f"properties/{property_id}",  # Target GA4 property
+                date_ranges=[DateRange(start_date="28daysAgo", end_date="yesterday")],  # Recent window
+                dimensions=[Dimension(name="pagePath")],  # Group by page path
+                metrics=[  # Engagement metrics of interest
+                    Metric(name="averageSessionDuration"),  # Dwell-time proxy
+                    Metric(name="bounceRate"),  # Bounce rate per page
+                    Metric(name="engagementRate"),  # Used to derive pogo-sticking risk
+                ],
+                dimension_filter=FilterExpression(  # Restrict to the requested page path
+                    filter=Filter(
+                        field_name="pagePath",
+                        string_filter=Filter.StringFilter(value=path),
+                    )
+                ),
+                limit=1,  # Only this page's row
+            )
+            response = client.run_report(request)  # Execute the report
+            if response.rows:  # Found data for this path variant
+                row = response.rows[0]  # First (only) row
+                names = [m.name for m in response.metric_headers]  # Metric names in order
+                values = [v.value for v in row.metric_values]  # Corresponding values
+                return dict(zip(names, values))  # name -> value mapping
+        return {}  # No data for any path variant
 
 
 # ============================================================================

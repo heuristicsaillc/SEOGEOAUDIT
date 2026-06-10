@@ -199,7 +199,7 @@ def _parse_text(ctx: PageContext, soup: BeautifulSoup) -> None:
 
 def _parse_links(ctx: PageContext, soup: BeautifulSoup) -> None:
     """Resolve all anchors to absolute URLs and classify internal vs external."""
-    host = urlparse(ctx.final_url or ctx.url).netloc.lower()  # Host of the audited page
+    page_host = registrable_host(urlparse(ctx.final_url or ctx.url).netloc)  # www == apex
     for a in soup.find_all("a", href=True):  # Iterate anchors that have an href
         href = a["href"].strip()  # Raw href value
         if not href or href.startswith(("javascript:", "mailto:", "tel:", "#")):  # Skip non-navigational
@@ -207,12 +207,13 @@ def _parse_links(ctx: PageContext, soup: BeautifulSoup) -> None:
         absolute = urljoin(ctx.final_url or ctx.url, href)  # Resolve relative to the page URL
         link_host = urlparse(absolute).netloc.lower()  # Host of the target
         rel = " ".join(a.get("rel", [])) if a.get("rel") else ""  # rel attribute as a string
+        same_site = link_host == "" or registrable_host(link_host) == page_host
         ctx.links.append(  # Record the structured link
             LinkInfo(
                 url=absolute,  # Absolute target URL
                 anchor=a.get_text(strip=True),  # Visible anchor text
                 rel=rel,  # rel value (e.g. nofollow)
-                is_internal=(link_host == host or link_host == ""),  # Same host => internal
+                is_internal=same_site,  # Same registrable host => internal
             )
         )
 
@@ -252,6 +253,11 @@ def _parse_jsonld(ctx: PageContext, soup: BeautifulSoup) -> None:
 # ============================================================================
 # 3. Fetcher (all page I/O)
 # ============================================================================
+
+
+def registrable_host(netloc: str) -> str:
+    """Return a host key that treats www and non-www as the same site."""
+    return netloc.lower().removeprefix("www.")
 
 
 def normalise_url(url: str) -> str:

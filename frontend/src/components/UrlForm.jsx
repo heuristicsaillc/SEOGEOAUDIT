@@ -17,7 +17,7 @@ export default function UrlForm({ onSubmit, loading }) {
       <input
         type="text" // Free text so users can omit the scheme
         className="url-input"
-        placeholder="https://example.com"
+        placeholder="www.example.com or https://example.com"
         value={url} // Controlled value
         onChange={(e) => setUrl(e.target.value)} // Update state on typing
         disabled={loading} // Lock input while a run is in flight

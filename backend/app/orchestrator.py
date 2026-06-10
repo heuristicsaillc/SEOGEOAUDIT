@@ -36,7 +36,7 @@ from app.agents.seo_agents import (  # The 7 SEO agents
 )
 from app.clients import Clients, build_async_client  # External clients + HTTP factory
 from app.config import Settings, get_settings  # Application configuration
-from app.crawl import Fetcher, normalise_url  # Page fetching
+from app.crawl import Fetcher, normalise_url, registrable_host  # Page fetching + host key
 from app.models import AuditResponse, CategoryResult, ParameterResult, Report  # Models
 from app.scoring import generate_summary, score_report  # Scoring + narrative
 
@@ -63,8 +63,7 @@ class ConnectedRegistry:
 
     def lookup(self, host: str) -> dict | None:
         """Return the connection info for `host` (or None when not connected)."""
-        host = host.lower().removeprefix("www.")  # Normalise host (drop leading www.)
-        return self._mapping.get(host)  # Connection info or None
+        return self._mapping.get(registrable_host(host))  # www and apex share one registry entry
 
 
 # ============================================================================

@@ -19,8 +19,10 @@ from fpdf.fonts import FontFace
 SRC = Path(__file__).with_name("SEO_GEO_Parameter_Reference.md")
 OUT = Path(__file__).with_name("SEO_GEO_Parameter_Reference.pdf")
 
-# Relative widths for the 5-column parameter tables.
+# Relative widths for parameter tables (landscape A4).
 TABLE5_WIDTHS = (38, 66, 64, 22, 47)
+TABLE4_WIDTHS = (42, 14, 118, 83)
+TABLE3_WIDTHS = (78, 32, 147)
 
 _REPL = {
     "\u2013": "-", "\u2014": "-", "\u2018": "'", "\u2019": "'",
@@ -149,13 +151,14 @@ def render_table(pdf: Doc, rows):
     if not rows:
         return
     ncols = len(rows[0])
-    widths = TABLE5_WIDTHS if ncols == 5 else None
-    pdf.set_font("Helvetica", "", 7)
+    widths = {5: TABLE5_WIDTHS, 4: TABLE4_WIDTHS, 3: TABLE3_WIDTHS}.get(ncols)
+    pdf.set_font("Helvetica", "", 6.5 if ncols == 4 else 7)
+    line_h = 3.8 if ncols == 4 else 4.2
     pdf.set_draw_color(200)
     with pdf.table(
         col_widths=widths,
         text_align="LEFT",
-        line_height=4.2,
+        line_height=line_h,
         first_row_as_headings=True,
         headings_style=FontFace(emphasis="BOLD", color=255, fill_color=(37, 99, 235)),
         cell_fill_color=(244, 247, 252),

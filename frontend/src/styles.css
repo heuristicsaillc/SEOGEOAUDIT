@@ -85,11 +85,27 @@ body {
   margin-bottom: 16px; /* Space below */
 }
 .loading {
-  display: flex; /* Spinner + text */
-  align-items: center; /* Vertically centre */
-  gap: 14px; /* Gap between */
-  color: var(--muted); /* Muted text */
-  padding: 24px 0; /* Vertical padding */
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  color: var(--muted);
+  padding: 24px 0;
+}
+.loading-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.loading-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+}
+.loading-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
 }
 .spinner {
   width: 22px; /* Spinner size */
@@ -148,6 +164,50 @@ body {
 .download-button:disabled {
   opacity: 0.6; /* Dim while generating */
   cursor: not-allowed; /* Blocked cursor */
+}
+.download-more {
+  position: relative; /* Anchor the dropdown menu */
+}
+.download-more-toggle {
+  min-width: 148px; /* Stable width while loading */
+}
+.download-more-menu {
+  position: absolute; /* Float below the toggle */
+  top: calc(100% + 6px); /* Small gap under button */
+  left: 0; /* Align with toggle */
+  z-index: 20; /* Above report content */
+  min-width: 280px; /* Fit long labels */
+  padding: 6px; /* Inner padding */
+  border-radius: var(--radius); /* Match panels */
+  background: var(--panel-2); /* Slightly lighter panel */
+  border: 1px solid #3a4f82; /* Visible outline */
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35); /* Lift above page */
+}
+.download-more-item {
+  display: block; /* Full-width menu rows */
+  width: 100%; /* Stretch to menu width */
+  padding: 10px 12px; /* Comfortable tap target */
+  border: none; /* Flat menu item */
+  border-radius: calc(var(--radius) - 2px); /* Subtle rounding */
+  background: transparent; /* Inherit menu background */
+  color: var(--text); /* Readable label */
+  font-size: 13px; /* Slightly smaller than main buttons */
+  text-align: left; /* Left-aligned labels */
+  cursor: pointer; /* Clickable */
+}
+.download-more-item:hover:not(:disabled) {
+  background: #2a3658; /* Highlight row */
+  color: white; /* High contrast */
+}
+.download-more-item:disabled {
+  opacity: 0.6; /* Dim while generating */
+  cursor: not-allowed; /* Blocked cursor */
+}
+.download-more-all {
+  margin-top: 4px; /* Separate from individual items */
+  border-top: 1px solid #2a3658; /* Visual divider */
+  padding-top: 12px; /* Space above divider */
+  font-weight: 600; /* Emphasise bulk action */
 }
 .tab-buttons {
   display: flex; /* Two tabs side by side */

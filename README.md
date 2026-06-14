@@ -65,24 +65,33 @@ This produces `frontend/dist`, which the backend serves in production.
 
 ## Running
 
-### Production (single unit — backend serves the built UI)
+### One command (recommended)
+
+From the project root:
 
 ```bash
-cd backend && source .venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+# First time only
+cd backend && python3 -m venv .venv && pip install -r requirements.txt && cd ..
+npm install
+
+# Every time
+npm run dev
 # open http://127.0.0.1:8000
 ```
 
-### Development (hot-reloading frontend)
+Or use the shell wrapper (same behavior):
 
 ```bash
-# Terminal 1 — API
-cd backend && source .venv/bin/activate
-uvicorn app.main:app --reload --port 8000
+./scripts/run-dev.sh
+```
 
-# Terminal 2 — Vite dev server (proxies /api to :8000)
-cd frontend && npm run dev
-# open http://127.0.0.1:5173
+The backend serves the built React UI and all `/api/*` routes on **port 8000**. Frontend changes rebuild automatically (`vite build --watch`); backend changes reload via uvicorn.
+
+### Production-style (no file watching)
+
+```bash
+npm start
+# open http://127.0.0.1:8000
 ```
 
 ### API

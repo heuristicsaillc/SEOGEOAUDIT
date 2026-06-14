@@ -416,6 +416,56 @@ class GscClient:
                 return GscApiResult(ok=True, data=result)
         return GscApiResult(ok=True, data={})
 
+    async def search_analytics_report(
+        self,
+        site_url: str,
+        *,
+        dimensions: list[str],
+        row_limit: int = 25,
+        days: int = 90,
+    ) -> GscApiResult:
+        """Return Search Analytics rows grouped by the given dimensions."""
+        if not self._enabled:
+            return GscApiResult(ok=False, error="Google credentials not configured")
+        return await self._run_with_retry(
+            lambda: self._search_analytics_report_sync(site_url, dimensions, row_limit, days)
+        )
+
+    def _search_analytics_report_sync(
+        self,
+        site_url: str,
+        dimensions: list[str],
+        row_limit: int,
+        days: int,
+    ) -> GscApiResult:
+        from datetime import date, timedelta
+
+        service = self._service_or_build()
+        end = date.today() - timedelta(days=1)
+        start = end - timedelta(days=max(1, days) - 1)
+        body = {
+            "startDate": start.isoformat(),
+            "endDate": end.isoformat(),
+            "dimensions": dimensions,
+            "rowLimit": row_limit,
+            "dataState": "final",
+        }
+        resp = service.searchanalytics().query(siteUrl=site_url, body=body).execute()
+        rows = resp.get("rows", [])
+        parsed = []
+        for row in rows:
+            keys = row.get("keys", [])
+            parsed.append(
+                {
+                    "keys": keys,
+                    "clicks": row.get("clicks", 0),
+                    "impressions": row.get("impressions", 0),
+                    "ctr": row.get("ctr", 0.0),
+                    "position": row.get("position", 0.0),
+                }
+            )
+        return GscApiResult(ok=True, data=parsed)
+
 
 class Ga4Client:
     """Read-only GA4 engagement metrics for a connected property (blocking SDK off-thread)."""
@@ -464,31 +514,342 @@ class Ga4Client:
         if creds is None:  # Should not happen when enabled=True
             raise RuntimeError("Google credentials not configured")
         client = BetaAnalyticsDataClient(credentials=creds)  # Authenticated GA4 client
+        def _page_path_filter(path: str) -> FilterExpression:
+            return FilterExpression(
+                filter=Filter(
+                    field_name="pagePath",
+                    string_filter=Filter.StringFilter(value=path),
+                )
+            )
+
+        def _row_metrics(request: RunReportRequest) -> dict:
+            try:
+                response = client.run_report(request)
+            except Exception:
+                return {}
+            if not response.rows:
+                return {}
+            names = [m.name for m in response.metric_headers]
+            values = [v.value for v in response.rows[0].metric_values]
+            return dict(zip(names, values))
+
         for path in self._page_path_variants(page_path):
-            request = RunReportRequest(  # Build the report request
-                property=f"properties/{property_id}",  # Target GA4 property
-                date_ranges=[DateRange(start_date="28daysAgo", end_date="yesterday")],  # Recent window
-                dimensions=[Dimension(name="pagePath")],  # Group by page path
-                metrics=[  # Engagement metrics of interest
-                    Metric(name="averageSessionDuration"),  # Dwell-time proxy
-                    Metric(name="bounceRate"),  # Bounce rate per page
-                    Metric(name="engagementRate"),  # Used to derive pogo-sticking risk
+            base = _row_metrics(
+                RunReportRequest(
+                    property=f"properties/{property_id}",
+                    date_ranges=[DateRange(start_date="28daysAgo", end_date="yesterday")],
+                    dimensions=[Dimension(name="pagePath")],
+                    metrics=[
+                        Metric(name="averageSessionDuration"),
+                        Metric(name="bounceRate"),
+                    ],
+                    dimension_filter=_page_path_filter(path),
+                    limit=1,
+                )
+            )
+            engagement = _row_metrics(
+                RunReportRequest(
+                    property=f"properties/{property_id}",
+                    date_ranges=[DateRange(start_date="28daysAgo", end_date="yesterday")],
+                    dimensions=[Dimension(name="pagePath")],
+                    metrics=[Metric(name="engagementRate")],
+                    dimension_filter=_page_path_filter(path),
+                    limit=1,
+                )
+            )
+            merged = {**base, **engagement}
+            if merged:
+                return merged
+        return {}
+
+    async def fetch_baseline(self, property_id: str, page_path: str, *, days: int = 90) -> dict:
+        """Return all GA4 datasets needed for the Performance Baseline PDF."""
+        if not self._enabled or not property_id:
+            return {}
+        try:
+            return await asyncio.to_thread(self._fetch_baseline_sync, property_id, page_path, days)
+        except Exception:
+            return {}
+
+    def _fetch_baseline_sync(self, property_id: str, page_path: str, days: int) -> dict:
+        """Blocking GA4 runReport bundle for baseline charts."""
+        from google.analytics.data_v1beta import BetaAnalyticsDataClient
+        from google.analytics.data_v1beta.types import (
+            DateRange,
+            Dimension,
+            Filter,
+            FilterExpression,
+            FilterExpressionList,
+            Metric,
+            OrderBy,
+            RunReportRequest,
+        )
+
+        creds = load_google_credentials(self._settings)
+        if creds is None:
+            return {}
+        client = BetaAnalyticsDataClient(credentials=creds)
+        date_range = [DateRange(start_date=f"{days}daysAgo", end_date="yesterday")]
+        prop = f"properties/{property_id}"
+        out: dict = {}
+
+        def _run(request: RunReportRequest) -> list[dict]:
+            try:
+                response = client.run_report(request)
+            except Exception:
+                return []
+            rows = []
+            dims = [d.name for d in response.dimension_headers]
+            metrics = [m.name for m in response.metric_headers]
+            for row in response.rows:
+                item = {}
+                for idx, dim in enumerate(dims):
+                    item[dim] = row.dimension_values[idx].value
+                for idx, metric in enumerate(metrics):
+                    item[metric] = row.metric_values[idx].value
+                rows.append(item)
+            return rows
+
+        # engagementRate is incompatible with bounceRate in one GA4 request — fetch separately.
+        overview_rows = _run(
+            RunReportRequest(
+                property=prop,
+                date_ranges=date_range,
+                metrics=[
+                    Metric(name="totalUsers"),
+                    Metric(name="newUsers"),
+                    Metric(name="bounceRate"),
+                    Metric(name="averageSessionDuration"),
+                    Metric(name="screenPageViewsPerSession"),
                 ],
-                dimension_filter=FilterExpression(  # Restrict to the requested page path
-                    filter=Filter(
-                        field_name="pagePath",
-                        string_filter=Filter.StringFilter(value=path),
+            )
+        )
+        engagement_overview_rows = _run(
+            RunReportRequest(
+                property=prop,
+                date_ranges=date_range,
+                metrics=[Metric(name="engagementRate")],
+            )
+        )
+        if overview_rows:
+            out["overview"] = overview_rows[0]
+            if engagement_overview_rows:
+                out["overview"]["engagementRate"] = engagement_overview_rows[0].get("engagementRate")
+        elif engagement_overview_rows:
+            out["overview"] = engagement_overview_rows[0]
+
+        for path in self._page_path_variants(page_path):
+            page_rows = _run(
+                RunReportRequest(
+                    property=prop,
+                    date_ranges=date_range,
+                    dimensions=[Dimension(name="pagePath")],
+                    metrics=[
+                        Metric(name="averageSessionDuration"),
+                        Metric(name="bounceRate"),
+                    ],
+                    dimension_filter=FilterExpression(
+                        filter=Filter(
+                            field_name="pagePath",
+                            string_filter=Filter.StringFilter(value=path),
+                        )
+                    ),
+                    limit=1,
+                )
+            )
+            engagement_page_rows = _run(
+                RunReportRequest(
+                    property=prop,
+                    date_ranges=date_range,
+                    dimensions=[Dimension(name="pagePath")],
+                    metrics=[Metric(name="engagementRate")],
+                    dimension_filter=FilterExpression(
+                        filter=Filter(
+                            field_name="pagePath",
+                            string_filter=Filter.StringFilter(value=path),
+                        )
+                    ),
+                    limit=1,
+                )
+            )
+            if page_rows or engagement_page_rows:
+                out["page_engagement"] = {
+                    **(page_rows[0] if page_rows else {}),
+                    **(engagement_page_rows[0] if engagement_page_rows else {}),
+                }
+                break
+
+        out["channels"] = _run(
+            RunReportRequest(
+                property=prop,
+                date_ranges=date_range,
+                dimensions=[Dimension(name="sessionDefaultChannelGroup")],
+                metrics=[
+                    Metric(name="totalUsers"),
+                    Metric(name="sessions"),
+                    Metric(name="screenPageViews"),
+                    Metric(name="averageSessionDuration"),
+                    Metric(name="engagementRate"),
+                ],
+                limit=15,
+            )
+        )
+        out["sources"] = _run(
+            RunReportRequest(
+                property=prop,
+                date_ranges=date_range,
+                dimensions=[Dimension(name="sessionSource")],
+                metrics=[
+                    Metric(name="totalUsers"),
+                    Metric(name="sessions"),
+                    Metric(name="screenPageViews"),
+                    Metric(name="averageSessionDuration"),
+                    Metric(name="engagementRate"),
+                ],
+                limit=25,
+            )
+        )
+        out["devices"] = _run(
+            RunReportRequest(
+                property=prop,
+                date_ranges=date_range,
+                dimensions=[Dimension(name="deviceCategory")],
+                metrics=[
+                    Metric(name="totalUsers"),
+                    Metric(name="averageSessionDuration"),
+                    Metric(name="engagementRate"),
+                    Metric(name="screenPageViewsPerSession"),
+                ],
+                limit=5,
+            )
+        )
+        out["bounce_trend"] = _run(
+            RunReportRequest(
+                property=prop,
+                date_ranges=date_range,
+                dimensions=[Dimension(name="date")],
+                metrics=[Metric(name="bounceRate")],
+                limit=500,
+            )
+        )
+        out["engagement_trend"] = _run(
+            RunReportRequest(
+                property=prop,
+                date_ranges=date_range,
+                dimensions=[Dimension(name="date")],
+                metrics=[Metric(name="averageSessionDuration")],
+                limit=500,
+            )
+        )
+        out["forms"] = _run(
+            RunReportRequest(
+                property=prop,
+                date_ranges=date_range,
+                dimensions=[Dimension(name="eventName")],
+                metrics=[Metric(name="eventCount")],
+                dimension_filter=FilterExpression(
+                    or_group=FilterExpressionList(
+                        expressions=[
+                            FilterExpression(
+                                filter=Filter(
+                                    field_name="eventName",
+                                    in_list_filter=Filter.InListFilter(
+                                        values=["form_start", "form_submit"],
+                                    ),
+                                )
+                            ),
+                            FilterExpression(
+                                filter=Filter(
+                                    field_name="eventName",
+                                    string_filter=Filter.StringFilter(
+                                        match_type=Filter.StringFilter.MatchType.PARTIAL_REGEXP,
+                                        value="form|submit|generate_lead|contact",
+                                    ),
+                                )
+                            ),
+                        ]
                     )
                 ),
-                limit=1,  # Only this page's row
+                order_bys=[
+                    OrderBy(
+                        metric=OrderBy.MetricOrderBy(metric_name="eventCount"),
+                        desc=True,
+                    ),
+                ],
+                limit=15,
             )
-            response = client.run_report(request)  # Execute the report
-            if response.rows:  # Found data for this path variant
-                row = response.rows[0]  # First (only) row
-                names = [m.name for m in response.metric_headers]  # Metric names in order
-                values = [v.value for v in row.metric_values]  # Corresponding values
-                return dict(zip(names, values))  # name -> value mapping
-        return {}  # No data for any path variant
+        )
+        out["top_pages"] = _run(
+            RunReportRequest(
+                property=prop,
+                date_ranges=date_range,
+                dimensions=[Dimension(name="pagePath")],
+                metrics=[
+                    Metric(name="sessions"),
+                    Metric(name="bounceRate"),
+                    Metric(name="screenPageViews"),
+                ],
+                limit=20,
+            )
+        )
+        social_rows = [
+            row
+            for row in out.get("channels", [])
+            if str(row.get("sessionDefaultChannelGroup", "")).lower() == "organic social"
+        ]
+        out["organic_social"] = social_rows
+        return out
+
+    async def fetch_page_inventory(
+        self,
+        property_id: str,
+        *,
+        days: int = 90,
+        limit: int = 500,
+    ) -> list[dict]:
+        """Return GA4 pagePath rows with sessions for orphan detection."""
+        if not self._enabled or not property_id:
+            return []
+        try:
+            return await asyncio.to_thread(self._fetch_page_inventory_sync, property_id, days, limit)
+        except Exception:
+            return []
+
+    def _fetch_page_inventory_sync(self, property_id: str, days: int, limit: int) -> list[dict]:
+        from google.analytics.data_v1beta import BetaAnalyticsDataClient
+        from google.analytics.data_v1beta.types import (
+            DateRange,
+            Dimension,
+            Metric,
+            OrderBy,
+            RunReportRequest,
+        )
+
+        creds = load_google_credentials(self._settings)
+        if creds is None:
+            return []
+        client = BetaAnalyticsDataClient(credentials=creds)
+        request = RunReportRequest(
+            property=f"properties/{property_id}",
+            date_ranges=[DateRange(start_date=f"{days}daysAgo", end_date="yesterday")],
+            dimensions=[Dimension(name="pagePath")],
+            metrics=[Metric(name="sessions"), Metric(name="screenPageViews")],
+            order_bys=[
+                OrderBy(metric=OrderBy.MetricOrderBy(metric_name="sessions"), desc=True),
+            ],
+            limit=limit,
+        )
+        try:
+            response = client.run_report(request)
+        except Exception:
+            return []
+        rows = []
+        for row in response.rows:
+            path = row.dimension_values[0].value if row.dimension_values else ""
+            sessions = row.metric_values[0].value if row.metric_values else "0"
+            views = row.metric_values[1].value if len(row.metric_values) > 1 else "0"
+            rows.append({"pagePath": path, "sessions": sessions, "screenPageViews": views})
+        return rows
 
 
 # ============================================================================

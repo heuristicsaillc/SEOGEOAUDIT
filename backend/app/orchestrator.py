@@ -12,6 +12,7 @@ from __future__ import annotations  # Forward references for typing
 import asyncio  # Concurrency primitives
 import json  # Read the connected-property registry file
 import time  # Wall-clock timing of the audit
+from collections.abc import Awaitable, Callable
 from pathlib import Path  # Registry file path handling
 
 from app.agents.base import AgentContext, BaseAgent  # Agent contract + context
@@ -34,10 +35,13 @@ from app.agents.seo_agents import (  # The 7 SEO agents
     TechnicalAgent,
     UxAgent,
 )
+from app.agents.site_audit_supplement_agent import SiteAuditSupplementAgent
 from app.clients import Clients, build_async_client  # External clients + HTTP factory
 from app.config import Settings, get_settings  # Application configuration
 from app.crawl import Fetcher, normalise_url, registrable_host  # Page fetching + host key
 from app.models import AuditResponse, CategoryResult, ParameterResult, Report  # Models
+from app.ai_health import attach_ai_search_health
+from app.audit_history import save_audit_snapshot
 from app.scoring import generate_summary, score_report  # Scoring + narrative
 
 
@@ -82,6 +86,7 @@ def build_agents() -> list[BaseAgent]:
         StructuredDataAgent(),  # 05 Structured Data & Social
         OffPageAgent(),  # 06 Off-Page & Authority
         UxAgent(),  # 07 UX & Engagement Signals
+        SiteAuditSupplementAgent(),  # HeuristicsAI site audit PDF supplementary (weight 0)
         # GEO (8 categories)
         AnswerabilityAgent(),  # 01 Answerability
         ExtractabilityAgent(),  # 02 Extractability
@@ -98,6 +103,8 @@ def build_agents() -> list[BaseAgent]:
 # Orchestrator
 # ============================================================================
 
+ProgressCallback = Callable[[str], Awaitable[None] | None]
+
 
 class AuditOrchestrator:
     """Coordinates crawl, agents, scoring and narrative for one audit."""
@@ -107,10 +114,25 @@ class AuditOrchestrator:
         self._settings = settings or get_settings()  # Use provided settings or the cached singleton
         self._registry = ConnectedRegistry(self._settings)  # Registry is cheap to keep around
 
-    async def run(self, url: str) -> AuditResponse:
+    async def run(
+        self,
+        url: str,
+        *,
+        on_progress: ProgressCallback | None = None,
+    ) -> AuditResponse:
         """Run the full audit for `url` and return both reports."""
+
+        async def emit(message: str) -> None:
+            if on_progress is None:
+                return
+            maybe = on_progress(message)
+            if asyncio.iscoroutine(maybe):
+                await maybe
+
         start = time.perf_counter()  # Begin timing
         normalised = normalise_url(url)  # Ensure the URL has a scheme
+
+        await emit("Fetching page content and performance data…")
 
         # One HTTP client is shared by the crawl and all REST-based API clients
         async with build_async_client(self._settings) as http:  # Auto-closes when done
@@ -132,30 +154,49 @@ class AuditOrchestrator:
                 page=page, clients=clients, connection=connection
             )
 
-            # Run every agent concurrently; collect their result lists
-            agents = build_agents()  # Instantiate all agents
-            outcomes = await asyncio.gather(
-                *(self._run_agent(agent, ctx) for agent in agents),  # One task per agent
-            )
+            agents = build_agents()
+            total = len(agents)
+            completed = 0
+
+            async def run_agent(agent: BaseAgent) -> list[ParameterResult]:
+                nonlocal completed
+                results = await self._run_agent(agent, ctx)
+                completed += 1
+                await emit(f"Analyzing categories ({completed}/{total})…")
+                return results
+
+            await emit("Running SEO and GEO analysis…")
+            outcomes = await asyncio.gather(*(run_agent(agent) for agent in agents))
 
             # Build the two reports from the agent outcomes
             seo_report, geo_report, panels = self._assemble_reports(agents, outcomes)
 
-            # Score both reports (categories -> final score + grade)
+            await emit("Calculating SEO and GEO scores…")
             score_report(seo_report)  # SEO scoring
             score_report(geo_report)  # GEO scoring
 
             # Attach the UI panels (CWV for SEO, citations for GEO)
             seo_report.panel = panels.get("cwv", {})  # Core Web Vitals panel
             geo_report.panel = panels.get("citations", {})  # AI-citation panel
+            attach_ai_search_health(seo_report, geo_report)  # Five-pillar AI Search Health
 
-            # Generate both narrative summaries concurrently
+            await emit("Writing executive summaries…")
             seo_summary, geo_summary = await asyncio.gather(
                 generate_summary(seo_report, clients.gemini),  # SEO narrative
                 generate_summary(geo_report, clients.gemini),  # GEO narrative
             )
             seo_report.summary = seo_summary  # Attach SEO narrative
             geo_report.summary = geo_summary  # Attach GEO narrative
+
+            await emit("Preparing your reports…")
+            try:
+                save_audit_snapshot(
+                    seo_report,
+                    geo_report,
+                    page.final_url or normalised,
+                )
+            except Exception as exc:
+                page.errors.append(f"audit history save failed: {exc}")
 
             duration = round(time.perf_counter() - start, 2)  # Total wall-clock time
             return AuditResponse(  # Assemble the API response

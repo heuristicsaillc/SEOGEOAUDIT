@@ -26,3 +26,4 @@ openai==1.59.5            # Async client for Gemini (OpenAI-compatible) + OpenAI
 
 # --- PDF export ---
 reportlab==4.2.5          # Generate downloadable SEO/GEO report PDFs
+matplotlib==3.10.1        # Performance Baseline chart images in supplementary PDFs

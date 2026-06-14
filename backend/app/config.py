@@ -46,12 +46,16 @@ class Settings(BaseSettings):
 
     # --- Crawl behaviour tunables (sensible defaults; override via .env) ---
     crawl_timeout_seconds: float = 20.0  # Per-request timeout for page/API fetches
-    crawl_max_internal_pages: int = 25  # Upper bound on pages pulled during the shallow internal crawl
+    crawl_max_internal_pages: int = 50  # Upper bound on pages pulled during the shallow internal crawl
     crawl_user_agent: str = "SEO-GEO-Auditor/1.0 (+https://github.com/seo-geo-auditor)"  # UA sent on crawls
     enable_playwright: bool = True  # Whether to render JS with Playwright (off => raw HTML only)
 
     # Registry mapping connected domains -> { gsc_site_url, ga4_property_id }
     connected_properties_path: str = str(PROJECT_ROOT / "backend" / "connected_properties.json")
+
+    # Full Site Audit trend snapshots (SQLite; one row per audit when metrics change)
+    audit_history_db_path: str = str(PROJECT_ROOT / "backend" / "data" / "audit_history.db")
+    audit_history_points: int = 12  # Snapshots shown on Full Site Audit trend charts
 
     # pydantic-settings configuration: read from .env, ignore unknown extra keys
     model_config = SettingsConfigDict(

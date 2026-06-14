@@ -6,18 +6,25 @@ as the single deployable unit described in the technical design.
 
 from __future__ import annotations  # Forward references for typing
 
+import asyncio
+import json
 from pathlib import Path  # Locate the built frontend directory
 from urllib.parse import urlparse  # Extract host for PDF filenames
 
 from fastapi import APIRouter, FastAPI, HTTPException  # ASGI app + routing
 from fastapi.middleware.cors import CORSMiddleware  # Allow the dev frontend to call the API
-from fastapi.responses import JSONResponse, Response  # JSON errors + raw PDF bytes
+from fastapi.responses import JSONResponse, Response, StreamingResponse  # JSON errors + raw PDF bytes
 from fastapi.staticfiles import StaticFiles  # Serve the built frontend assets
 from starlette.types import Scope  # ASGI scope typing
 
-from app.models import AuditRequest, AuditResponse, ReportPdfRequest  # Request/response models
-from app.orchestrator import AuditOrchestrator  # Runs the audit pipeline
+from app.baseline_analytics import fetch_baseline_analytics
+from app.clients import Clients, build_async_client
+from app.config import get_settings
+from app.crawl import registrable_host
+from app.models import AuditRequest, AuditResponse, ReportPdfRequest, SupplementaryPdfRequest
+from app.orchestrator import AuditOrchestrator, ConnectedRegistry  # Runs the audit pipeline
 from app.pdf_export import build_report_pdf  # PDF generator
+from app.reference_pdf_export import build_reference_pdf, supplementary_filename
 
 # Path to the built React app (frontend/dist) relative to this file
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
@@ -78,6 +85,47 @@ def create_app() -> FastAPI:
         except Exception as exc:  # Catastrophic failure (should be rare)
             raise HTTPException(status_code=500, detail=f"Audit failed: {exc}") from exc  # 500
 
+    @api.post("/audit/stream")
+    async def audit_stream(request: AuditRequest) -> StreamingResponse:
+        """Run an audit and stream progress events (SSE) before the final JSON payload."""
+        if not request.url or not request.url.strip():
+            raise HTTPException(status_code=400, detail="A non-empty 'url' is required.")
+
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+        async def on_progress(message: str) -> None:
+            await queue.put({"type": "progress", "message": message})
+
+        async def run_audit() -> None:
+            try:
+                result = await _orchestrator.run(request.url, on_progress=on_progress)
+                await queue.put({"type": "complete", "data": result.model_dump(mode="json")})
+            except Exception as exc:
+                await queue.put({"type": "error", "message": str(exc)})
+            finally:
+                await queue.put(None)
+
+        async def event_stream():
+            task = asyncio.create_task(run_audit())
+            try:
+                while True:
+                    item = await queue.get()
+                    if item is None:
+                        break
+                    yield f"data: {json.dumps(item)}\n\n"
+            finally:
+                await task
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @api.post("/report/pdf")
     async def report_pdf(request: ReportPdfRequest) -> Response:
         """Generate a downloadable PDF for one SEO or GEO report."""
@@ -94,6 +142,45 @@ def create_app() -> FastAPI:
         host = urlparse(request.final_url).netloc.replace("www.", "") or "site"  # Filename host
         filename = f"{request.report.kind}-audit-{host}.pdf"
         return Response(  # Stream the PDF as a file download
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @api.post("/report/supplementary-pdf")
+    async def supplementary_pdf(request: SupplementaryPdfRequest) -> Response:
+        """Generate a supplementary reference-style PDF (baseline, HeuristicsAI full, or HeuristicsAI AI)."""
+        analytics = None
+        if request.kind == "performance_baseline" and request.connected:
+            settings = get_settings()
+            host = registrable_host(urlparse(request.final_url).netloc)
+            connection = ConnectedRegistry(settings).lookup(host)
+            if connection:
+                async with build_async_client(settings) as http:
+                    clients = Clients.create(settings, http)
+                    analytics = await fetch_baseline_analytics(
+                        clients.ga4,
+                        clients.gsc,
+                        connection,
+                        request.final_url,
+                    )
+        try:
+            pdf_bytes = build_reference_pdf(
+                request.kind,
+                seo=request.seo,
+                geo=request.geo,
+                final_url=request.final_url,
+                duration_seconds=request.duration_seconds,
+                connected=request.connected,
+                analytics=analytics,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"PDF export failed: {exc}") from exc
+
+        filename = supplementary_filename(request.kind, request.final_url)
+        return Response(
             content=pdf_bytes,
             media_type="application/pdf",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},

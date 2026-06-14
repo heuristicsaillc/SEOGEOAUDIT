@@ -163,3 +163,17 @@ class ReportPdfRequest(BaseModel):
     duration_seconds: float = 0.0  # Audit duration in seconds
     connected: bool = False  # Whether GA4/GSC connected mode was active
     report: Report  # The SEO or GEO report to export
+
+
+class SupplementaryPdfRequest(BaseModel):
+    """Body of POST /api/report/supplementary-pdf: reference-style supplementary export."""
+
+    final_url: str  # Audited URL shown on the cover
+    duration_seconds: float = 0.0  # Audit duration in seconds
+    connected: bool = False  # Whether GA4/GSC connected mode was active
+    seo: Report  # Full SEO report (parameter lookup only)
+    geo: Report  # Full GEO report (parameter lookup only)
+    kind: str = Field(
+        ...,
+        description="performance_baseline | site_audit_full | ai_search_overview",
+    )

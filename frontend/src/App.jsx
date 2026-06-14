@@ -9,21 +9,25 @@ export default function App() {
   const [result, setResult] = useState(null);
   // Whether an audit is currently running (drives the progress UI)
   const [loading, setLoading] = useState(false);
+  // Live status message while the report is generated
+  const [status, setStatus] = useState("");
   // The most recent error message, if any
   const [error, setError] = useState("");
 
   // Run an audit for the submitted URL and store the result/error
   async function handleAudit(url) {
-    setLoading(true); // Enter the loading state
-    setError(""); // Clear any previous error
-    setResult(null); // Clear the previous result
+    setLoading(true);
+    setError("");
+    setResult(null);
+    setStatus("Starting…");
     try {
-      const data = await runAudit(url); // Call the backend
-      setResult(data); // Store the two reports
+      const data = await runAudit(url, setStatus);
+      setResult(data);
     } catch (err) {
-      setError(err.message || "Audit failed."); // Surface the error
+      setError(err.message || "Audit failed.");
     } finally {
-      setLoading(false); // Leave the loading state
+      setLoading(false);
+      setStatus("");
     }
   }
 
@@ -47,7 +51,10 @@ export default function App() {
       {loading && (
         <div className="loading">
           <div className="spinner" aria-hidden="true" />
-          <p>Crawling, rendering and running 15 analysis agents…</p>
+          <div className="loading-text">
+            <p className="loading-title">Generating report…</p>
+            {status && <p className="loading-status">{status}</p>}
+          </div>
         </div>
       )}
 

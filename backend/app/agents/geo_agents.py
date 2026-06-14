@@ -785,10 +785,32 @@ class AiBotCrawlabilityAgent(BaseAgent):
 
         # --- Google-Extended (controls AI Overviews training) ---
         results.append(self._bot_row(
-            groups, "Google-Extended", "Google-Extended",
+            groups, "Google-Extended bot blocking", "Google-Extended",
             "Controls AI Overviews training data",
             "Allow Google-Extended to permit use in AI Overviews (or block intentionally).",
         ))
+
+        # --- Individual AI bot user-agents (AI Search Overview PDF) ---
+        for ua, param_name in (
+            ("ChatGPT-User", "ChatGPT-User bot blocking"),
+            ("OAI-SearchBot", "OAI-SearchBot bot blocking"),
+            ("Googlebot", "Googlebot blocking"),
+            ("GPTBot", "GPTBot bot blocking"),
+            ("PerplexityBot", "PerplexityBot bot blocking"),
+            ("Perplexity-User", "Perplexity-User bot blocking"),
+            ("ClaudeBot", "ClaudeBot bot blocking"),
+            ("Claude-User", "Claude-User bot blocking"),
+            ("Claude-SearchBot", "Claude-SearchBot bot blocking"),
+        ):
+            results.append(
+                self._bot_row(
+                    groups,
+                    param_name,
+                    ua,
+                    f"Explicit allow/disallow for {ua} in robots.txt",
+                    f"Allow {ua} in robots.txt if you want this AI crawler to access your site.",
+                )
+            )
 
         # --- llms.txt ---
         results.append(

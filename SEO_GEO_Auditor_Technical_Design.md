@@ -2,9 +2,11 @@
 
 Technical design for an application that audits any website for Search Engine Optimisation (SEO) and Generative Engine Optimisation (GEO), scores it, and produces two separate reports (one for SEO, one for GEO) with recommendations to improve each.
 
-Status: GA4 + Google Search Console use **OAuth CLI** (personal Google account) as the primary auth path. A one-time browser sign-in saves a refresh token; `backend/connected_properties.json` maps each domain to its GSC site URL and GA4 Property ID. Up to **6 first-party SEO parameters** are scored for connected domains when APIs succeed. Service account remains an optional fallback (`GOOGLE_APPLICATION_CREDENTIALS`); OAuth token takes priority when both exist.
+Status: GA4 + Google Search Console use **OAuth CLI** (personal Google account) as the primary auth path. A one-time browser sign-in saves a refresh token; `backend/connected_properties.json` maps each domain to its GSC site URL and GA4 Property ID. Up to **6 first-party SEO parameters** are scored for connected domains when APIs succeed. Connected Mode also powers a **Performance Baseline** supplementary PDF (23 GA4/GSC + CWV metrics). Service account remains an optional fallback (`GOOGLE_APPLICATION_CREDENTIALS`); OAuth token takes priority when both exist.
 
 Setup guides (OAuth only, no service account): `Connected_Mode_Site_Owner_Guide.pdf` and `Connected_Mode_Tool_Operator_Guide.pdf` (regenerate via `generate_connected_guide_pdf.py`). Regenerate this document's PDF with `python3 generate_pdf.py SEO_GEO_Auditor_Technical_Design.md SEO_GEO_Auditor_Technical_Design.pdf`.
+
+**Recent additions (2026):** three Semrush-style supplementary PDFs (Performance Baseline, Full Site Audit, AI Search Overview); unified `npm run dev` workflow; SSE audit progress streaming; SQLite audit-history trend charts; PDF parameter comparison tool (`scripts/build_pdf_parameter_comparison.py`).
 
 ---
 
@@ -15,21 +17,45 @@ Setup guides (OAuth only, no service account): `Connected_Mode_Site_Owner_Guide.
 - Gemini is the LLM used for all AI judgement (content quality, answerability, citation likelihood, etc.).
 - SEO is crawl-based; non-crawlable SEO parameters are Manual and excluded from the score, except 6 that are measured when the domain is a connected GA4/GSC property.
 - GEO is fully automated using external APIs plus Gemini (no Manual parameters).
+- **Supplementary PDFs:** in addition to the in-app SEO/GEO reports, the tool generates three client-facing PDF exports aligned to Semrush reference layouts (Performance Baseline, Full Site Audit, AI Search Overview). These are built with ReportLab from resolved parameter catalogs plus live GA4/GSC bundles when Connected Mode is active.
+- **Dev workflow:** `npm run dev` from the project root builds the frontend (watch mode) and starts the backend on **http://127.0.0.1:8000** (single URL for UI + API).
 
 # 2. Architecture and data flow
 
 [[FLOW:architecture]]
 
-End-to-end: the URL is fetched (raw HTTP + rendered DOM); the SEO and GEO analyzers read the page plus their data sources; results are scored independently; two reports are returned together and shown as two tabs in the UI.
+End-to-end: the URL is fetched (raw HTTP + rendered DOM); the SEO and GEO analyzers read the page plus their data sources; results are scored independently; two reports are returned together and shown as two tabs in the UI. Optional shallow multi-page crawl data enriches Full Site Audit and AI Search Overview PDFs. Connected domains trigger parallel GA4/GSC fetches for first-party SEO parameters and for the Performance Baseline PDF analytics bundle.
+
+### Backend modules (extended)
+
+| Module | Role |
+|---|---|
+| `main.py` | FastAPI routes: `/api/audit`, `/api/audit/stream` (SSE progress), `/api/report/pdf`, `/api/report/supplementary-pdf`; serves built React app |
+| `orchestrator.py` | Concurrent crawl + PSI + agents; `ConnectedRegistry`; optional `on_progress` callback for streaming |
+| `crawl.py` | Page fetch/render/parse; shallow site crawl graph for supplement agent |
+| `clients.py` | GSC, GA4, PSI, SerpApi, etc.; `Ga4Client.fetch_baseline()` for baseline PDF bundle |
+| `baseline_analytics.py` | Parallel GA4/GSC pull → `BaselineAnalytics` dataclass for baseline PDF |
+| `baseline_charts.py` | Matplotlib charts embedded in Performance Baseline PDF |
+| `reference_pdf_catalog.py` | Maps Semrush-style PDF parameters → app parameter keys + manual reasons |
+| `reference_pdf_export.py` | Builds the three supplementary PDFs |
+| `reference_pdf_layout.py` | Shared ReportLab styles, tables, score badges, executive summaries |
+| `pdf_export.py` | SEO/GEO report PDF export |
+| `audit_history.py` | SQLite snapshots for Full Site Audit trend charts (≥2 runs) |
+| `agents/site_audit_supplement_agent.py` | Shallow-crawl issue inventory, site health, internal link distribution |
+| `ai_health.py` | Five-pillar AI Search Health score for AI Overview PDF |
+| `internal_link_distribution.py` | Inlink bucket data for Full Site Audit PDF |
 
 # 3. Tech stack
 
 - Backend: FastAPI + Uvicorn (Python). Serves the API and the built React app.
-- Frontend: Vite + React (URL input, progress, two report tabs).
+- Frontend: Vite + React (URL input, live audit progress, SEO/GEO tabs, supplementary PDF download tabs).
+- Root tooling: npm + `concurrently` (`npm run dev` runs backend reload + frontend watch build).
 - Fetch/render: httpx (raw HTML, headers, redirects) + Playwright/Firecrawl (rendered DOM for JS-heavy pages).
 - Parse: BeautifulSoup + lxml.
 - Performance: Google PageSpeed Insights API (Lighthouse + lab Core Web Vitals + CrUX field data).
 - First-party analytics: google-api-python-client + google-auth + google-auth-oauthlib (OAuth CLI), google-analytics-data (GA4 Data API). Credentials loaded by `app/google_auth.py` — OAuth refresh token first, service account fallback.
+- PDF export: ReportLab (supplementary + SEO/GEO PDFs), Matplotlib (baseline trend/bar charts), pypdf (comparison script text extraction).
+- Persistence: SQLite (`backend/data/audit_history.db`) for Full Site Audit trend history.
 - LLM: Gemini via google-genai. OpenAI used only for ChatGPT-style citation checks.
 
 # 4. Detection methods
@@ -58,10 +84,37 @@ End-to-end: the URL is fetched (raw HTTP + rendered DOM); the SEO and GEO analyz
 
 # 7. Reports
 
+## In-app reports (JSON + UI)
+
 - Two separate reports returned in one API response and shown as two tabs.
-- Each report header shows the final score + grade; each category shows a sub-score.
+- Each report header shows the final score + grade in a coloured circle badge; each category shows a sub-score.
 - Each category renders a table: Parameter | What to check | Rating | Recommendation. When a row has both `detail` and `recommendation`, the UI shows the recommendation with evidence `detail` beneath it (muted). SEO Manual and Not Measured rows are visually de-emphasised and noted as excluded from the score.
 - SEO report adds a Core Web Vitals panel; GEO report adds an AI-citation appearance panel (which engines cite the site + competitor gap).
+- **Audit progress:** `POST /api/audit/stream` emits Server-Sent Events (`progress`, `complete`, `error`) so the UI shows live status ("Generating report…") during long audits.
+
+## PDF exports
+
+| Export | Endpoint | Description |
+|---|---|---|
+| SEO or GEO report | `POST /api/report/pdf` | Standard letter-grade report PDF (`pdf_export.py`) |
+| Performance Baseline | `POST /api/report/supplementary-pdf` (`kind=performance_baseline`) | Traffic, engagement, GSC/GA4 dashboards, CWV; **23 parameters** |
+| Full Site Audit | `POST /api/report/supplementary-pdf` (`kind=site_audit_full`) | Site health, errors/warnings/notices, internal links, trend charts; **99 parameters** |
+| AI Search Overview | `POST /api/report/supplementary-pdf` (`kind=ai_search_overview`) | AI Search Health, bot blocking, crawl status, top issues; **12 parameters** |
+
+Supplementary PDFs share a common layout system (`reference_pdf_layout.py`):
+
+- Branded cover + Heuristics header/footer on audit-style PDFs.
+- **Executive summary** (page 2): coloured score badge(s) with label left-aligned, bulleted issues & resolutions (severity colours), optional GA4/GSC KPI lines.
+- Compact section spacing (no forced one-parameter-per-page layout).
+- Performance Baseline **Overview** KPI grid uses Excel-style full cell borders.
+- Full Site Audit shows a single **Site Health** badge in the executive summary (same value as SEO score); issue counts colour red/amber only when count > 0.
+- AI Search Overview shows **AI Search Health** only (Site Health is scoped to Full Site Audit).
+
+The UI exposes supplementary PDFs as additional download tabs after an audit completes. When Connected Mode is active, `performance_baseline` requests trigger `fetch_baseline_analytics()` before PDF generation.
+
+## PDF parameter comparison
+
+`scripts/build_pdf_parameter_comparison.py` compares generated PDFs in `Documents/.../Comparison/` against Semrush reference PDFs and writes `PDF-Parameter-Comparison-{date}.pdf` with per-parameter tables: Reference value | Generated value | Why not calculated (from catalog `manual_reason`).
 
 ---
 
@@ -328,9 +381,21 @@ When GSC accepts a service-account email, set `GOOGLE_APPLICATION_CREDENTIALS` t
 | Click-through rate (CTR) | GSC | searchanalytics.query | clicks, impressions, ctr, average position (per page); **Not Meeting** when connected but 0 impressions |
 | Sitemap submission status | GSC | sitemaps.list | submitted paths, errors, warnings; **Not Meeting** when 0 sitemaps, **Partial** when errors |
 | Log file analysis (crawl frequency) | GSC | urlInspection.index.inspect | lastCrawlTime, coverageState, verdict, pageFetchState, robotsTxtState; **Partial** when crawled but not indexed |
-| Dwell time / scroll depth | GA4 | runReport (28daysAgo–yesterday, pagePath filter) | averageSessionDuration, bounceRate, engagementRate (per pagePath) |
+| Dwell time / scroll depth | GA4 | runReport (28daysAgo–yesterday, pagePath filter) | averageSessionDuration, bounceRate, engagementRate (per pagePath; **engagementRate fetched in a separate request** — incompatible with bounceRate in one GA4 call) |
 | Bounce rate | GA4 | runReport | bounceRate (per page) |
-| Pogo-sticking risk | GA4 + GSC | runReport + derived | low engagementRate when GA4 data exists |
+| Pogo-sticking risk | GA4 + GSC | runReport + derived | engagementRate when GA4 data exists |
+
+### Performance Baseline PDF analytics (Connected Mode)
+
+When `kind=performance_baseline` and the domain is connected, `Ga4Client.fetch_baseline()` pulls a 90-day property-level bundle in parallel with GSC dimensions:
+
+| Baseline PDF metric | GA4 / GSC source |
+|---|---|
+| Engagement Rate, Total Users, New Users, Bounce Rate, Avg Session Duration, Pages per session | GA4 property overview (+ separate engagementRate query) |
+| Clicks by device / country, organic traffic trend, top keywords | GSC searchAnalytics |
+| Traffic by channel, session sources, Organic Social, device split, bounce/engagement trends, top pages, forms | GA4 runReport dimensions |
+
+Resolution order for **Engagement Rate** in the baseline PDF: property overview → page-level engagement → Pogo-sticking risk parameter detail.
 
 ## First-party rating outcomes (connected mode)
 
@@ -395,11 +460,20 @@ For a multi-tenant product this mapping is collected via an onboarding form and 
 |---|---|
 | `app/google_auth.py` | Load OAuth token or service account; refresh expired tokens |
 | `scripts/google_auth.py` | One-time CLI sign-in; `--list-only` to re-list properties |
-| `app/clients.py` (`GscClient`, `Ga4Client`, `GscApiResult`) | GSC sitemaps / searchanalytics / urlInspection; GA4 runReport; PSI via `GOOGLE_API_KEY` |
+| `app/clients.py` (`GscClient`, `Ga4Client`, `GscApiResult`) | GSC sitemaps / searchanalytics / urlInspection; GA4 runReport + `fetch_baseline()`; PSI via `GOOGLE_API_KEY` |
+| `app/baseline_analytics.py` | `fetch_baseline_analytics()` — parallel GA4/GSC bundle for baseline PDF |
 | `app/agents/seo_agents.py` | `_sitemap_gsc`, `_log_analysis`, `_ctr_row` — connected-mode First-party logic |
+| `app/agents/site_audit_supplement_agent.py` | Shallow crawl supplement: issue counts, site health, link distribution |
 | `app/agents/base.py` | `scored`, `manual`, `first_party_empty`, `not_measured` result factories |
-| `app/orchestrator.py` (`ConnectedRegistry`) | Domain lookup at audit time |
+| `app/orchestrator.py` (`ConnectedRegistry`) | Domain lookup at audit time; progress callbacks |
+| `app/reference_pdf_catalog.py` | Parameter catalogs for three supplementary PDFs |
+| `app/reference_pdf_export.py` | PDF builders for baseline, full site audit, AI overview |
+| `app/reference_pdf_layout.py` | ReportLab layout primitives, score badges, tables |
+| `app/audit_history.py` | SQLite store + trend chart data for Full Site Audit PDF |
+| `app/ai_health.py` | AI Search Health composite score |
 | `backend/connected_properties.json` | Static registry (JSON file today) |
+| `scripts/build_pdf_parameter_comparison.py` | Semrush vs generated PDF comparison report |
+| `scripts/run-dev.sh` / root `package.json` | Single-command dev server |
 | `generate_connected_guide_pdf.py` | Professional PDFs for site-owner and tool-operator setup guides |
 
 ## Limits and behaviour
@@ -411,6 +485,8 @@ For a multi-tenant product this mapping is collected via an onboarding form and 
 | GSC/GA4 API failure | After retries, parameter is **Not Measured** (`first_party_empty`) with error detail in the report |
 | Empty URL Inspection | Connected but no inspection result → **Not Measured** until Googlebot crawls the URL |
 | GA4 without sessions | Dwell / bounce / pogo rows stay **Manual** until GA4 returns engagement data |
+| GA4 engagementRate + bounceRate | Must be requested in **separate** `runReport` calls (GA4 metric incompatibility); merged in client |
+| Audit history DB | `backend/data/audit_history.db` (gitignored); trend charts appear after ≥2 runs with changed metrics |
 | PageSpeed Insights | Requires PageSpeed Insights API enabled in the tool operator's Cloud project and `GOOGLE_API_KEY` in `.env`; otherwise CWV/PSI parameters are **Not Measured** |
 | URL Inspection quota | 2,000 inspections per property per day; the tool inspects the audited URL only |
 | Privacy | Read-only scopes (`webmasters.readonly` + `analytics.readonly`); owner can revoke OAuth access or remove users at any time |
@@ -419,6 +495,16 @@ For a multi-tenant product this mapping is collected via an onboarding form and 
 ---
 
 # Part 4 - APIs and keys summary
+
+## HTTP API (selected)
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/health` | Health check |
+| POST | `/api/audit` | Run full audit; returns SEO + GEO JSON reports |
+| POST | `/api/audit/stream` | Same audit with SSE progress events |
+| POST | `/api/report/pdf` | Download SEO or GEO report PDF |
+| POST | `/api/report/supplementary-pdf` | Download baseline / full site audit / AI overview PDF |
 
 | Capability | API / source | .env key | Status |
 |---|---|---|---|
@@ -432,5 +518,45 @@ For a multi-tenant product this mapping is collected via an onboarding form and 
 | Brand mentions on X | X API | X_BEARER_TOKEN | Present |
 | First-party analytics (GA4 + GSC) | Search Console + GA4 Data API (OAuth CLI primary) | `secrets/google-oauth-token.json` (+ optional `GOOGLE_APPLICATION_CREDENTIALS` fallback) | Per connected domain |
 | Entity graph | Wikidata SPARQL + Wikipedia REST | none | No key needed |
+| PDF generation | ReportLab + Matplotlib | none (Python deps in `requirements.txt`) | Built-in |
 
 All other API keys are read from `.env` at startup via `app/config.py`. PageSpeed and first-party Google access are independent: PSI uses `GOOGLE_API_KEY`; GSC/GA4 use OAuth (or service-account fallback).
+
+---
+
+# Part 5 - Supplementary PDF reports (detail)
+
+Three client-facing PDFs mirror Semrush export layouts. Each uses `reference_pdf_catalog.py` to map external metric names to existing auditor parameters (or documents why a metric is not calculated).
+
+## 1. Performance Baseline (`performance_baseline`)
+
+- **23 parameters:** GA4 overview KPIs (engagement, users, bounce, session duration), GSC device/country/keywords/pages, GA4 channel/source/social/device reports, CWV (LCP/CLS/INP), load speed, form submissions, exit pages, bounce/engagement trend charts.
+- **Connected Mode required** for most traffic metrics; CWV from PSI regardless.
+- **Layout:** cover → executive summary (SEO score badge) → Overview KPI grid (bordered) → sectional tables and Matplotlib charts.
+- **Analytics entry point:** `fetch_baseline_analytics()` called from `POST /api/report/supplementary-pdf` when `connected=true`.
+
+## 2. Full Site Audit (`site_audit_full`)
+
+- **99 parameters:** Semrush-style errors, warnings, notices from shallow crawl supplement agent; site health (= SEO score); crawled page status; internal link distribution; optional trend charts from `audit_history.db`.
+- **Site audit supplement agent** runs after primary SEO crawl; populates issue inventory and link buckets.
+- **Executive summary:** single Site Health badge + error/warning/notice counts; issue tables use severity colour only when count > 0.
+
+## 3. AI Search Overview (`ai_search_overview`)
+
+- **12 parameters:** AI Search Health score (`ai_health.py`), aggregate AI bot blocking %, per-bot robots.txt rules (ChatGPT-User, OAI-SearchBot, Google-Extended, Perplexity, Claude, etc.), crawl status breakdown, top issues list.
+- **Site Health** intentionally excluded (reported in Full Site Audit instead).
+- **Executive summary:** AI Search Health badge only + blocked-pages percentage + actionable GEO/SEO issue bullets (dashboard/meta parameters filtered from action items).
+
+## Parameter resolution
+
+For each catalog row, `reference_pdf_export.py`:
+
+1. Resolves from SEO/GEO `ParameterResult` index via `app_keys`.
+2. Overrides with live GA4/GSC data when `BaselineAnalytics` is available (baseline PDF).
+3. Marks **Manual** with catalog `manual_reason` when data cannot be obtained.
+
+Manual-parameter appendix sections were removed from client PDFs; reasons appear only in the internal comparison PDF and catalog.
+
+## Audit history and trends
+
+`audit_history.py` stores per-domain snapshots (site health, crawled pages, error/warning/notice counts) in SQLite on each audit when metrics change. Full Site Audit PDF embeds 2×2 mini trend charts when ≥2 distinct snapshots exist for the domain.

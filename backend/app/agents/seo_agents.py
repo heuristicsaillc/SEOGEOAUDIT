@@ -58,6 +58,18 @@ class CrawlabilityAgent(BaseAgent):
 
         # --- sitemap.xml present, valid, lastmod populated ---
         sm = page.sitemap  # Sitemap discovery result
+        if sm.blocked:
+            sm_detail = (
+                f"exists={sm.exists}, urls={sm.url_count}, lastmod={sm.lastmod_count}, "
+                f"blocked=True, {sm.block_detail or 'bot_protection'}"
+            )
+            sm_rec = (
+                "Sitemap URL could not be fetched due to bot protection (e.g. Cloudflare). "
+                "Allowlist the auditor or ensure sitemap XML is reachable without a JS challenge."
+            )
+        else:
+            sm_detail = f"exists={sm.exists}, urls={sm.url_count}, lastmod={sm.lastmod_count}"
+            sm_rec = "Publish a sitemap.xml listing canonical URLs with <lastmod> dates."
         results.append(
             scored(
                 "sitemap.xml",  # Parameter name
@@ -65,8 +77,8 @@ class CrawlabilityAgent(BaseAgent):
                 meeting=sm.exists and sm.url_count > 0 and sm.lastmod_count > 0,  # Full pass
                 partial=sm.exists and sm.url_count > 0 and sm.lastmod_count == 0,  # Present, no lastmod
                 method=DetectionMethod.CRAWL,  # Detected by fetching the sitemap
-                detail=f"exists={sm.exists}, urls={sm.url_count}, lastmod={sm.lastmod_count}",  # Evidence
-                recommendation="Publish a sitemap.xml listing canonical URLs with <lastmod> dates.",
+                detail=sm_detail,  # Evidence
+                recommendation=sm_rec,
                 priority=Priority.HIGH,
             )
         )
@@ -654,19 +666,42 @@ class TechnicalAgent(BaseAgent):
             )
         )
 
-        # --- Broken links (internal 4xx/5xx from the crawl sample) ---
-        broken = [u for u, s in page.link_status.items() if s >= 400 or s == 0]  # Failing links
+        # --- Broken links (real internal 4xx/5xx only; exclude bot-protection blocks) ---
+        from app.crawl import STATUS_BOT_BLOCKED, is_reportable_http_error
+
+        broken = [u for u, s in page.link_status.items() if is_reportable_http_error(s)]
+        broken_4xx = [u for u, s in page.link_status.items() if is_reportable_http_error(s) and 400 <= s < 500]
+        broken_5xx = [u for u, s in page.link_status.items() if is_reportable_http_error(s) and s >= 500]
+        bot_blocked = [
+            u
+            for u, s in page.link_status.items()
+            if s == STATUS_BOT_BLOCKED or s in (401, 403, 429)
+        ]
+        unverified = [u for u, s in page.link_status.items() if s == 0]
+        detail = (
+            f"{len(broken)} broken of {len(page.link_status)} sampled links "
+            f"(4xx={len(broken_4xx)}, 5xx={len(broken_5xx)}, "
+            f"bot_blocked={len(bot_blocked)}, unreachable={len(unverified)})"
+        )
         results.append(
             scored(
                 "Broken links",  # Parameter name
                 "0 internal 4xx; external link monitoring",  # What to check
-                meeting=len(broken) == 0,  # No broken links in the sample
+                meeting=len(broken) == 0,  # No real broken links in the sample
                 partial=0 < len(broken) <= 2,  # A couple of broken links
                 method=DetectionMethod.CRAWL,  # From the crawl link-status sample
-                detail=f"{len(broken)} broken of {len(page.link_status)} sampled links",  # Evidence
-                recommendation="Fix or remove links returning 4xx/5xx status codes.",
+                detail=detail,
+                recommendation="Fix or remove links returning real 4xx/5xx status codes.",
                 priority=Priority.MEDIUM,
-                evidence={"broken_sample": broken[:10]},  # Sample for the UI
+                evidence={
+                    "broken_sample": broken[:10],
+                    "broken_4xx": broken_4xx[:10],
+                    "broken_5xx": broken_5xx[:10],
+                    "bot_blocked_sample": bot_blocked[:5],
+                    "count": len(broken),
+                    "count_4xx": len(broken_4xx),
+                    "count_5xx": len(broken_5xx),
+                },
             )
         )
 

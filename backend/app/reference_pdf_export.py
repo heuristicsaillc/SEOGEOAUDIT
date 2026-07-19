@@ -18,6 +18,7 @@ from reportlab.platypus import (
     Paragraph,
     Spacer,
     Table,
+    TableStyle,
 )
 
 from app.ai_health import compute_ai_search_health
@@ -25,11 +26,12 @@ from app.audit_history import AuditHistoryStore
 from app.baseline_analytics import BaselineAnalytics
 from app.baseline_charts import bar_chart, horizontal_bar_chart, line_chart, mini_line_chart
 from app.config import get_settings
+from app.developer_fixes import developer_fix_text, enrich_report
 from app.models import ParameterResult, Rating, Report
+from app.pdf_format import fmt_count, fmt_duration, fmt_num, fmt_pct, fmt_score, fmt_users
 from app.reference_pdf_catalog import (
     CATALOG_BY_PDF,
     PDF_FILENAMES,
-    PDF_TITLES,
     RefParameter,
 )
 from app.reference_pdf_layout import (
@@ -37,7 +39,8 @@ from app.reference_pdf_layout import (
     CONTENT_TOP_MARGIN,
     MARGIN,
     PAGE_SIZE,
-    _baseline_table_style,
+    TABLE_RULE,
+    _format_developer_fix_html,
     audit_cover,
     audit_generated_label,
     audit_issue_table,
@@ -52,8 +55,6 @@ from app.reference_pdf_layout import (
     issue_counts_table,
     kpi_grid,
     para,
-    count_paragraph,
-    rating_paragraph,
     section_spacer,
     subsection_spacer,
     styles,
@@ -98,6 +99,9 @@ def build_reference_pdf(
 ) -> bytes:
     if kind not in CATALOG_BY_PDF:
         raise ValueError(f"Unknown supplementary PDF kind: {kind}")
+
+    enrich_report(seo, page_url=final_url)
+    enrich_report(geo, page_url=final_url)
 
     catalog = CATALOG_BY_PDF[kind]
     index = _index_parameters(seo, geo)
@@ -153,15 +157,22 @@ def _build_baseline_pdf(
 
     story.extend(baseline_cover(st, range_label, generated_label, domain=host))
     story.append(PageBreak())
+    baseline_actions = _baseline_action_items(by_name, seo, panel, page_url=final_url)
     story.extend(
         executive_summary(
             st,
             domain=host,
             report_label="Performance Baseline",
             score_badges=[("SEO score", seo.score, seo.grade)],
-            score_lines=_baseline_score_lines(seo, panel, analytics),
-            narrative=_trim_summary(seo.summary),
-            action_items=_baseline_action_items(by_name, seo, panel),
+            score_lines=_key_metric_issue_lines(seo),
+            narrative=_short_executive_overview(
+                score=seo.score,
+                grade=seo.grade,
+                score_label="SEO score",
+                action_items=baseline_actions,
+                focus="performance and SEO",
+            ),
+            action_items=baseline_actions,
         )
     )
     story.append(PageBreak())
@@ -175,7 +186,7 @@ def _build_baseline_pdf(
         story.append(subsection_spacer())
         story.append(Paragraph("Clicks: Device", st["subsection"]))
         device_rows = [
-            [r["label"], f"{r['share'] * 100:.1f}%", str(r["clicks"])]
+            [r["label"], fmt_pct(r["share"]), fmt_count(r["clicks"])]
             for r in analytics.gsc_device
         ]
         story.append(
@@ -201,7 +212,7 @@ def _build_baseline_pdf(
         story.append(subsection_spacer())
         story.append(Paragraph("Clicks: Country", st["subsection"]))
         country_rows = [
-            [r["label"], f"{r['share'] * 100:.1f}%", str(r["clicks"])]
+            [r["label"], fmt_pct(r["share"]), fmt_count(r["clicks"])]
             for r in analytics.gsc_country[:10]
         ]
         story.append(
@@ -219,7 +230,7 @@ def _build_baseline_pdf(
         story.append(Paragraph("Organic traffic trend (SEO performance)", st["section_title"]))
         story.append(Paragraph(para(f"US | Domain | {host}"), st["muted"]))
         page_rows = [
-            [r["label"][:55], f"{r['share'] * 100:.2f}", str(r["clicks"])]
+            [r["label"][:55], fmt_pct(r["share"]), fmt_count(r["clicks"])]
             for r in analytics.gsc_top_pages[:20]
         ]
         story.append(
@@ -237,9 +248,9 @@ def _build_baseline_pdf(
         channel_rows = [
             [
                 r.get("sessionDefaultChannelGroup", ""),
-                r.get("totalUsers", ""),
-                r.get("screenPageViews", ""),
-                r.get("sessions", ""),
+                fmt_count(r.get("totalUsers")),
+                fmt_count(r.get("screenPageViews")),
+                fmt_count(r.get("sessions")),
                 _fmt_duration(r.get("averageSessionDuration")),
                 _fmt_pct(r.get("engagementRate")),
             ]
@@ -271,9 +282,9 @@ def _build_baseline_pdf(
         source_rows = [
             [
                 r.get("sessionSource", ""),
-                r.get("totalUsers", ""),
-                r.get("screenPageViews", ""),
-                r.get("sessions", ""),
+                fmt_count(r.get("totalUsers")),
+                fmt_count(r.get("screenPageViews")),
+                fmt_count(r.get("sessions")),
                 _fmt_duration(r.get("averageSessionDuration")),
                 _fmt_pct(r.get("engagementRate")),
             ]
@@ -305,8 +316,8 @@ def _build_baseline_pdf(
                 [
                     [
                         r.get("sessionDefaultChannelGroup", "Organic Social"),
-                        r.get("totalUsers", "0"),
-                        r.get("sessions", "0"),
+                        fmt_count(r.get("totalUsers", "0")),
+                        fmt_count(r.get("sessions", "0")),
                         _fmt_pct(r.get("engagementRate")),
                     ]
                     for r in social_rows
@@ -325,9 +336,9 @@ def _build_baseline_pdf(
                 [
                     [
                         r.get("sessionDefaultChannelGroup", ""),
-                        r.get("totalUsers", ""),
-                        r.get("screenPageViews", ""),
-                        r.get("sessions", ""),
+                        fmt_count(r.get("totalUsers")),
+                        fmt_count(r.get("screenPageViews")),
+                        fmt_count(r.get("sessions")),
                         _fmt_duration(r.get("averageSessionDuration")),
                         _fmt_pct(r.get("engagementRate")),
                     ]
@@ -346,10 +357,10 @@ def _build_baseline_pdf(
             kw_rows = [
                 [
                     r["label"],
-                    f"{r['ctr'] * 100:.2f}%",
-                    f"{r['position']:.1f}",
-                    str(r["clicks"]),
-                    str(r["impressions"]),
+                    fmt_pct(r["ctr"]),
+                    fmt_num(r["position"]),
+                    fmt_count(r["clicks"]),
+                    fmt_count(r["impressions"]),
                 ]
                 for r in analytics.gsc_keywords[:20]
             ]
@@ -373,7 +384,7 @@ def _build_baseline_pdf(
         elif not analytics.gsc_keywords_ok and analytics.gsc_keywords_error:
             story.append(
                 Paragraph(
-                    para(f"GSC keyword data unavailable: {analytics.gsc_keywords_error}"),
+                    para(_friendly_gsc_keyword_message(analytics.gsc_keywords_error)),
                     st["body"],
                 )
             )
@@ -381,8 +392,8 @@ def _build_baseline_pdf(
             story.append(
                 Paragraph(
                     para(
-                        "No query-level data in Google Search Console for this property in the selected period. "
-                        "Verify the site is verified in GSC and has search impressions."
+                        "No keyword data in Google Search Console for this period. "
+                        "Confirm the property is verified and has search impressions, then re-run the audit."
                     ),
                     st["body"],
                 )
@@ -412,7 +423,7 @@ def _build_baseline_pdf(
         story.append(Paragraph("Pages per session", st["section_title"]))
         story.append(
             Paragraph(
-                para(f"Average pages per session: {analytics.overview['screenPageViewsPerSession']}"),
+                para(f"Average pages per session: {fmt_num(analytics.overview['screenPageViewsPerSession'])}"),
                 st["body"],
             )
         )
@@ -427,10 +438,10 @@ def _build_baseline_pdf(
                 [
                     [
                         r.get("deviceCategory", ""),
-                        r.get("totalUsers", ""),
+                        fmt_count(r.get("totalUsers")),
                         _fmt_duration(r.get("averageSessionDuration")),
                         _fmt_pct(r.get("engagementRate")),
-                        r.get("screenPageViewsPerSession", ""),
+                        fmt_num(r.get("screenPageViewsPerSession")),
                     ]
                     for r in analytics.ga4_devices
                 ],
@@ -448,17 +459,19 @@ def _build_baseline_pdf(
             story.append(subsection_spacer())
             story.append(chart_image(png))
 
-    cwv_rows = _baseline_cwv_rows(by_name, panel, seo)
+    cwv_rows = _baseline_cwv_rows(by_name, panel, seo, page_url=final_url)
     if cwv_rows:
         story.append(section_spacer())
         story.append(Paragraph("Core Web Vitals (LCP, CLS, INP) &amp; Page load speed", st["section_title"]))
+        usable = PAGE_SIZE[0] - 2 * MARGIN
+        cwv_widths = [usable * 0.16, usable * 0.12, usable * 0.16, usable * 0.56]
         story.append(Paragraph("For Mobile", st["subsection"]))
         story.append(
             data_table(
-                ["Metric", "Value", "Assessment"],
+                ["Metric", "Value", "Assessment", "Recommendation"],
                 cwv_rows["mobile"],
                 st,
-                col_widths=[1.5 * inch, 1.2 * inch, 2.0 * inch],
+                col_widths=cwv_widths,
                 rating_col=2,
             )
         )
@@ -467,10 +480,10 @@ def _build_baseline_pdf(
             story.append(Paragraph("For Desktop", st["subsection"]))
             story.append(
                 data_table(
-                    ["Metric", "Value", "Assessment"],
+                    ["Metric", "Value", "Assessment", "Recommendation"],
                     cwv_rows["desktop"],
                     st,
-                    col_widths=[1.5 * inch, 1.2 * inch, 2.0 * inch],
+                    col_widths=cwv_widths,
                     rating_col=2,
                 )
             )
@@ -482,7 +495,7 @@ def _build_baseline_pdf(
             story.append(
                 data_table(
                     ["Event", "Count"],
-                    [[r.get("eventName", ""), r.get("eventCount", "")] for r in analytics.ga4_forms],
+                    [[r.get("eventName", ""), fmt_count(r.get("eventCount"))] for r in analytics.ga4_forms],
                     st,
                     col_widths=[3.0 * inch, 1.2 * inch],
                 )
@@ -522,9 +535,9 @@ def _build_baseline_pdf(
                 [
                     [
                         r.get("pagePath", ""),
-                        r.get("sessions", ""),
+                        fmt_count(r.get("sessions")),
                         _fmt_pct(r.get("bounceRate")),
-                        r.get("screenPageViews", ""),
+                        fmt_count(r.get("screenPageViews")),
                     ]
                     for r in sorted_pages
                 ],
@@ -550,7 +563,7 @@ def _build_site_audit_full_pdf(
     crawled = _crawled_pages(seo)
     story: list = []
 
-    story.extend(audit_cover(st, "Heuristics AI — Full Site Audit", domain, generated))
+    story.extend(audit_cover(st, "Full Site Audit Report", domain, generated))
     story.append(NextPageTemplate("content"))
     story.append(PageBreak())
 
@@ -562,6 +575,7 @@ def _build_site_audit_full_pdf(
     warn_count = sum(_issue_count(r) for r in warnings)
     notice_count = sum(_issue_count(r) for r in notices)
     health = max(0.0, min(100.0, seo.score))
+    site_audit_actions = _site_audit_action_items(rows, seo, page_url=final_url)
 
     story.extend(
         executive_summary(
@@ -569,11 +583,15 @@ def _build_site_audit_full_pdf(
             domain=domain,
             report_label="Full Site Audit",
             score_badges=[("Site Health", health, seo.grade)],
-            score_lines=[
-                f"{err_count} errors · {warn_count} warnings · {notice_count} notices",
-            ],
-            narrative=_trim_summary(seo.summary),
-            action_items=_site_audit_action_items(rows, seo),
+            score_lines=_key_metric_issue_lines_from_counts(err_count, warn_count, notice_count),
+            narrative=_short_executive_overview(
+                score=health,
+                grade=seo.grade,
+                score_label="Site Health",
+                action_items=site_audit_actions,
+                focus="site audit",
+            ),
+            action_items=site_audit_actions,
         )
     )
     story.append(PageBreak())
@@ -641,17 +659,35 @@ def _build_site_audit_full_pdf(
     if errors:
         story.append(section_spacer())
         story.append(Paragraph(f"ERRORS {err_count}", st["audit_h2_error"]))
-        story.append(audit_issue_table(_audit_issue_lines(errors), st, severity="error"))
+        story.append(
+            audit_issue_table(
+                _audit_issue_lines(errors, seo=seo, page_url=final_url),
+                st,
+                severity="error",
+            )
+        )
 
     if warnings:
         story.append(section_spacer())
         story.append(Paragraph(f"WARNINGS {warn_count}", st["audit_h2_warning"]))
-        story.append(audit_issue_table(_audit_issue_lines(warnings), st, severity="warning"))
+        story.append(
+            audit_issue_table(
+                _audit_issue_lines(warnings, seo=seo, page_url=final_url),
+                st,
+                severity="warning",
+            )
+        )
 
     if notices:
         story.append(section_spacer())
         story.append(Paragraph(f"NOTICES {notice_count}", st["audit_h2_notice"]))
-        story.append(audit_issue_table(_audit_issue_lines(notices), st, severity="notice"))
+        story.append(
+            audit_issue_table(
+                _audit_issue_lines(notices, seo=seo, page_url=final_url),
+                st,
+                severity="notice",
+            )
+        )
 
 
     return _render_audit(story, domain=domain, generated=generated)
@@ -671,13 +707,14 @@ def _build_ai_search_overview_pdf(
     crawled = _crawled_pages(seo)
     story: list = []
 
-    story.extend(audit_cover(st, "Heuristics AI — AI Search Overview", domain, generated))
+    story.extend(audit_cover(st, "Site Audit: Overview", domain, generated))
     story.append(NextPageTemplate("content"))
     story.append(PageBreak())
 
     ai_health = _ai_search_health_score(seo, geo)
     blocked_pct, blocked_n = _ai_blocked_stats(by_name, crawled)
     healthy, broken, redirected, have_issues = _crawl_status_breakdown(seo, by_name, crawled)
+    ai_actions = _ai_overview_action_items(by_name, seo, geo, page_url=final_url)
 
     story.extend(
         executive_summary(
@@ -685,9 +722,14 @@ def _build_ai_search_overview_pdf(
             domain=domain,
             report_label="AI Search Overview",
             score_badges=[("AI Search Health", ai_health, None)],
-            score_lines=[f"{blocked_pct:.1f}% pages blocked from AI crawlers"],
-            narrative=_trim_summary(geo.summary or seo.summary),
-            action_items=_ai_overview_action_items(by_name, seo, geo),
+            score_lines=_key_metric_issue_lines(seo, geo),
+            narrative=_short_executive_overview(
+                score=ai_health,
+                score_label="AI Search Health",
+                action_items=ai_actions,
+                focus="AI search readiness",
+            ),
+            action_items=ai_actions,
         )
     )
     story.append(PageBreak())
@@ -702,11 +744,11 @@ def _build_ai_search_overview_pdf(
         data_table(
             ["Status", "Share", "Pages"],
             [
-                ["Blocked", f"{blocked_pct:.1f}%", str(blocked_n)],
+                ["Blocked", fmt_pct(blocked_pct), str(blocked_n)],
                 ["Redirect", _redirect_share(by_name, crawled), str(redirected)],
-                ["Have issues", f"{(have_issues / crawled * 100) if crawled else 0:.1f}%", str(have_issues)],
-                ["Broken", f"{(broken / crawled * 100) if crawled else 0:.1f}%", str(broken)],
-                ["Healthy", f"{(healthy / crawled * 100) if crawled else 0:.1f}%", str(healthy)],
+                ["Have issues", fmt_pct((have_issues / crawled * 100) if crawled else 0), str(have_issues)],
+                ["Broken", fmt_pct((broken / crawled * 100) if crawled else 0), str(broken)],
+                ["Healthy", fmt_pct((healthy / crawled * 100) if crawled else 0), str(healthy)],
                 ["Total", "100%", str(crawled)],
             ],
             st,
@@ -729,51 +771,55 @@ def _build_ai_search_overview_pdf(
             )
         )
 
-    top_issues = _ai_top_issues(by_name)
+    top_issues = _ai_top_issues(by_name, page_url=final_url)
     story.append(section_spacer())
     story.append(Paragraph("Top Issues", st["audit_h2"]))
     if top_issues:
-        issue_rows = [[issue, severity, pages] for issue, severity, pages in top_issues]
         usable = PAGE_SIZE[0] - 2 * MARGIN
-        table_data: list = [
-            [
-                Paragraph("<b>Issue</b>", st["cell"]),
-                Paragraph("<b>Severity</b>", st["cell_center"]),
-                Paragraph("<b>Pages</b>", st["cell_center"]),
-            ]
-        ]
-        for issue, severity, pages in issue_rows:
+        table_data: list = []
+        for issue, severity, pages, fix in top_issues:
             try:
                 page_n = int(str(pages).strip() or "0")
             except ValueError:
                 page_n = 0
             sev_key = severity.lower()
-            if page_n > 0:
-                issue_style = (
-                    "audit_issue_error"
-                    if sev_key in ("error", "not meeting")
-                    else "audit_issue_warning"
-                )
+            if page_n <= 0:
+                sev_hex = "#16A34A"
+            elif sev_key in ("error", "not meeting"):
+                sev_hex = "#DC2626"
             else:
-                issue_style = "cell"
-            if page_n > 0:
-                sev_cell = rating_paragraph(severity, severity, st, center=True)
-            else:
-                sev_cell = Paragraph(para(severity), st["cell_center"])
+                sev_hex = "#EA580C"
+            fix_html = _format_developer_fix_html(str(fix)) if page_n > 0 else ""
+            left_html = (
+                f'<font color="{sev_hex}"><b>{para(issue)}</b></font>'
+                f'<br/><font color="#767676">{para(severity)} · {para(str(pages))} pages</font>'
+            )
+            if fix_html:
+                left_html += f'<br/><font color="#767676">{fix_html}</font>'
             table_data.append(
                 [
-                    Paragraph(para(issue), st[issue_style]),
-                    sev_cell,
-                    count_paragraph(str(pages), severity if page_n > 0 else None, st),
+                    Paragraph(left_html, st["issue_name"]),
+                    Paragraph(para(str(pages)), st["issue_count"]),
                 ]
             )
         table = Table(
             table_data,
-            colWidths=[usable * 0.58, usable * 0.22, usable * 0.12],
-            repeatRows=1,
+            colWidths=[usable * 0.86, usable * 0.14],
             hAlign="LEFT",
         )
-        table.setStyle(_baseline_table_style())
+        table.setStyle(
+            TableStyle(
+                [
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                    ("TOPPADDING", (0, 0), (-1, -1), 8),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                    ("LINEBELOW", (0, 0), (-1, -2), 0.4, TABLE_RULE),
+                ]
+            )
+        )
         story.append(table)
     else:
         story.append(Paragraph("All good — no issues found", st["audit_body"]))
@@ -964,7 +1010,7 @@ def _baseline_analytics_detail(
         if analytics.gsc_keywords:
             return f"keywords={len(analytics.gsc_keywords)}"
         if not analytics.gsc_keywords_ok and analytics.gsc_keywords_error:
-            return f"GSC error: {analytics.gsc_keywords_error}"
+            return _friendly_gsc_keyword_message(analytics.gsc_keywords_error)
         return "No query data in GSC for this period"
     if name == "Bounce rate & Average engagement time (charts)":
         bounce_days = len(analytics.ga4_bounce_trend)
@@ -1037,9 +1083,9 @@ def _lighthouse_score(row: ResolvedRow) -> str:
     if row.param and row.param.evidence:
         perf = row.param.evidence.get("performance")
         if perf is not None:
-            return f"{perf}"
+            return fmt_score(perf)
     match = re.search(r"performance=(\d+(?:\.\d+)?)", row.detail or "")
-    return match.group(1) if match else ""
+    return fmt_score(match.group(1)) if match else ""
 
 
 def _detail_field(detail: str, field: str) -> str:
@@ -1096,21 +1142,23 @@ def _baseline_overview_kpis(
                 continue
             if key == "Engagement Rate":
                 val = _detail_field(row.detail, "engagementRate") or _extract_percent(row.detail)
-                kpis.append((label, val or "—"))
+                kpis.append((label, _fmt_pct(val) if val else "—"))
             elif key == "Average Session Duration":
-                kpis.append((label, _detail_field(row.detail, "averageSessionDuration") or row.detail[:20]))
+                raw = _detail_field(row.detail, "averageSessionDuration") or row.detail[:20]
+                kpis.append((label, _fmt_duration(raw) if raw else "—"))
             elif key == "Bounce Rate":
                 val = _detail_field(row.detail, "bounceRate") or _extract_percent(row.detail)
-                kpis.append((label, val or "—"))
+                kpis.append((label, _fmt_pct(val) if val else "—"))
             else:
-                kpis.append((label, row.detail[:24] or "—"))
+                raw = (row.detail or "—")[:24]
+                kpis.append((label, fmt_count(raw) if raw not in ("—", "") else "—"))
 
     if panel.get("lcp_ms") is not None:
-        kpis.append(("LCP (mobile)", f"{panel['lcp_ms'] / 1000:.2f}s"))
+        kpis.append(("LCP (mobile)", f"{fmt_num(panel['lcp_ms'] / 1000)}s"))
     if panel.get("cls") is not None:
-        kpis.append(("CLS (mobile)", str(panel["cls"])))
+        kpis.append(("CLS (mobile)", fmt_num(panel["cls"])))
     if panel.get("inp_ms") is not None:
-        kpis.append(("INP (mobile)", f"{panel['inp_ms'] / 1000:.2f}s"))
+        kpis.append(("INP (mobile)", f"{fmt_num(panel['inp_ms'] / 1000)}s"))
     return kpis
 
 
@@ -1123,23 +1171,93 @@ def _trim_summary(text: str | None, *, limit: int = 900) -> str:
     return cleaned[: limit - 3].rsplit(" ", 1)[0] + "..."
 
 
-def _resolved_fix(row: ResolvedRow, index: dict[str, ParameterResult] | None = None) -> str:
-    if row.param and row.param.recommendation:
-        return row.param.recommendation
-    if row.param and row.param.detail:
-        return row.param.detail
-    if index and row.source:
+def _short_executive_overview(
+    *,
+    score: float | None = None,
+    grade: str | None = None,
+    score_label: str = "Score",
+    action_items: list[tuple[str, str, str]],
+    focus: str = "SEO",
+) -> str:
+    """One short Overview paragraph: severity counts only — no named issue list."""
+    high = sum(
+        1
+        for _, severity, _ in action_items
+        if severity.lower() in ("not meeting", "error", "errors")
+    )
+    moderate = sum(
+        1
+        for _, severity, _ in action_items
+        if severity.lower() in ("partial", "warning", "warnings")
+    )
+    lower = sum(
+        1
+        for _, severity, _ in action_items
+        if severity.lower() in ("notice", "notices")
+    )
+    total = len(action_items)
+
+    parts: list[str] = []
+    if score is not None:
+        grade_bit = f" (grade {grade})" if grade else ""
+        parts.append(f"{score_label} is {float(score):.0f}%{grade_bit}.")
+
+    if total == 0:
+        parts.append(
+            f"No critical {focus} issues were identified in this run. "
+            "Continue monitoring the metrics in the sections below."
+        )
+        return " ".join(parts)
+
+    buckets: list[str] = []
+    if high:
+        buckets.append(f"{high} high-priority")
+    if moderate:
+        buckets.append(f"{moderate} moderate")
+    if lower:
+        buckets.append(f"{lower} lower-priority")
+    if not buckets:
+        buckets.append(str(total))
+
+    parts.append(
+        f"This report highlights {total} priority area{'s' if total != 1 else ''} "
+        f"({', '.join(buckets)}) that need attention. "
+        "Specific findings and developer fixes are listed below."
+    )
+    return " ".join(parts)
+
+
+def _resolved_fix(
+    row: ResolvedRow,
+    index: dict[str, ParameterResult] | None = None,
+    *,
+    page_url: str = "",
+) -> str:
+    param = row.param
+    if param is None and index and row.source:
         param = index.get(row.source)
-        if param and param.recommendation:
+    if param is not None:
+        text = developer_fix_text(param, page_url=page_url)
+        if text:
+            return text
+        if param.recommendation:
             return param.recommendation
-        if param and param.detail:
+        if param.detail:
             return param.detail
     if row.detail and not row.is_manual:
         return row.detail
-    return "Review the detailed findings in this report and apply the recommended SEO/GEO best practice."
+    return (
+        f"Where: page/template for {page_url or 'the audited URL'}\n"
+        "Change: Review the detailed findings in this report and apply the "
+        "recommended SEO/GEO best practice."
+    )
 
 
-def _collect_report_action_items(*reports: Report, limit: int = 12) -> list[tuple[str, str, str]]:
+def _collect_report_action_items(
+    *reports: Report,
+    limit: int = 12,
+    page_url: str = "",
+) -> list[tuple[str, str, str]]:
     order = {"Not Meeting": 0, "Partial": 1}
     candidates: list[tuple[int, str, str, str]] = []
     for report in reports:
@@ -1148,30 +1266,37 @@ def _collect_report_action_items(*reports: Report, limit: int = 12) -> list[tupl
                 rating = param.rating.value
                 if rating not in order:
                     continue
-                fix = param.recommendation or param.detail or param.what_to_check
+                fix = developer_fix_text(param, page_url=page_url) or param.recommendation or param.detail
                 candidates.append((order[rating], param.name, rating, fix))
     candidates.sort(key=lambda item: item[0])
     return [(name, rating, fix) for _, name, rating, fix in candidates[:limit]]
 
 
-def _baseline_score_lines(
-    seo: Report,
-    panel: dict,
-    analytics: BaselineAnalytics | None,
-) -> list[str]:
-    lines: list[str] = []
-    if analytics and analytics.has_ga4_overview():
-        lines.append(f"Users {_fmt_users(analytics.overview.get('totalUsers', '—'))}")
-    lcp = panel.get("lcp_ms")
-    if lcp is not None:
-        lines.append(f"Mobile LCP {lcp / 1000:.2f}s")
-    return lines
+def _key_metric_issue_lines_from_counts(errors: int, warnings: int, notices: int = 0) -> list[str]:
+    """Executive Summary Key metric row: errors · warnings · notices."""
+    return [f"{int(errors)} errors · {int(warnings)} warnings · {int(notices)} notices"]
+
+
+def _key_metric_issue_lines(*reports: Report) -> list[str]:
+    """Count Not Meeting / Partial parameters as errors / warnings for Key metric."""
+    errors = 0
+    warnings = 0
+    for report in reports:
+        for category in report.categories:
+            for param in category.parameters:
+                if param.rating == Rating.NOT_MEETING:
+                    errors += 1
+                elif param.rating == Rating.PARTIAL:
+                    warnings += 1
+    return _key_metric_issue_lines_from_counts(errors, warnings, 0)
 
 
 def _baseline_action_items(
     by_name: dict[str, ResolvedRow],
     seo: Report,
     panel: dict,
+    *,
+    page_url: str = "",
 ) -> list[tuple[str, str, str]]:
     items: list[tuple[str, str, str]] = []
     cwv_keys = (
@@ -1184,9 +1309,9 @@ def _baseline_action_items(
     for key in cwv_keys:
         row = by_name.get(key)
         if row and not row.is_manual and row.rating in ("Not Meeting", "Partial"):
-            items.append((key, row.rating, _resolved_fix(row)))
+            items.append((key, row.rating, _resolved_fix(row, page_url=page_url)))
     if len(items) < 8:
-        for name, rating, fix in _collect_report_action_items(seo, limit=8):
+        for name, rating, fix in _collect_report_action_items(seo, limit=8, page_url=page_url):
             if (name, rating, fix) not in items and name not in {i[0] for i in items}:
                 items.append((name, rating, fix))
             if len(items) >= 8:
@@ -1194,7 +1319,12 @@ def _baseline_action_items(
     return items[:8]
 
 
-def _site_audit_action_items(rows: list[ResolvedRow], seo: Report) -> list[tuple[str, str, str]]:
+def _site_audit_action_items(
+    rows: list[ResolvedRow],
+    seo: Report,
+    *,
+    page_url: str = "",
+) -> list[tuple[str, str, str]]:
     index: dict[str, ParameterResult] = {}
     for category in seo.categories:
         for param in category.parameters:
@@ -1204,7 +1334,7 @@ def _site_audit_action_items(rows: list[ResolvedRow], seo: Report) -> list[tuple
         for row in _audit_section_rows(rows, section):
             if row.rating not in ("Not Meeting", "Partial"):
                 continue
-            items.append((row.name, row.rating, _resolved_fix(row, index)))
+            items.append((row.name, row.rating, _resolved_fix(row, index, page_url=page_url)))
             if len(items) >= 10:
                 return items
     return items
@@ -1219,6 +1349,8 @@ def _ai_overview_action_items(
     by_name: dict[str, ResolvedRow],
     seo: Report,
     geo: Report,
+    *,
+    page_url: str = "",
 ) -> list[tuple[str, str, str]]:
     index = _index_parameters(seo, geo)
     items: list[tuple[str, str, str]] = []
@@ -1227,14 +1359,14 @@ def _ai_overview_action_items(
             continue
         if row.rating != "Not Meeting":
             continue
-        fix = _resolved_fix(row, index)
+        fix = _resolved_fix(row, index, page_url=page_url)
         if _is_internal_evidence_fix(fix):
             continue
         items.append((row.name, row.rating, fix))
         if len(items) >= 8:
             return items
     if len(items) < 5:
-        for name, rating, fix in _collect_report_action_items(seo, geo, limit=8):
+        for name, rating, fix in _collect_report_action_items(seo, geo, limit=8, page_url=page_url):
             if name in _AI_OVERVIEW_ACTION_SKIP or name in {i[0] for i in items}:
                 continue
             if _is_internal_evidence_fix(fix):
@@ -1283,31 +1415,15 @@ def _filter_manual_with_analytics(
 
 
 def _fmt_pct(value) -> str:
-    try:
-        v = float(value)
-        return f"{v * 100:.1f}%" if v <= 1 else f"{v:.1f}%"
-    except (TypeError, ValueError):
-        return str(value or "—")
+    return fmt_pct(value)
 
 
 def _fmt_users(value) -> str:
-    try:
-        v = float(value)
-        if v >= 1000:
-            return f"{v / 1000:.2f}K"
-        return str(int(v))
-    except (TypeError, ValueError):
-        return str(value or "—")
+    return fmt_users(value)
 
 
 def _fmt_duration(value) -> str:
-    try:
-        seconds = float(value)
-        minutes = int(seconds // 60)
-        secs = int(seconds % 60)
-        return f"{minutes}m {secs}s"
-    except (TypeError, ValueError):
-        return str(value or "—")
+    return fmt_duration(value)
 
 
 def _fmt_chart_date(raw: str) -> str:
@@ -1316,7 +1432,28 @@ def _fmt_chart_date(raw: str) -> str:
     return raw
 
 
-def _baseline_cwv_rows(by_name: dict[str, ResolvedRow], panel: dict, seo: Report) -> dict[str, list[list[str]]]:
+def _cwv_recommendation(row: ResolvedRow, *, page_url: str = "") -> str:
+    """Concise improvement guidance for Partial/Not Meeting CWV rows; else em dash."""
+    if row.rating not in ("Not Meeting", "Partial"):
+        return "—"
+    fix = _resolved_fix(row, page_url=page_url)
+    if not fix:
+        return "—"
+    for line in fix.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("change:"):
+            return stripped[len("Change:") :].strip() or fix
+    return fix
+
+
+def _baseline_cwv_rows(
+    by_name: dict[str, ResolvedRow],
+    panel: dict,
+    seo: Report,
+    *,
+    page_url: str = "",
+) -> dict[str, list[list[str]]]:
+    del seo  # reserved for call-site compatibility / future panel fallbacks
     mobile: list[list[str]] = []
     desktop: list[list[str]] = []
 
@@ -1330,23 +1467,47 @@ def _baseline_cwv_rows(by_name: dict[str, ResolvedRow], panel: dict, seo: Report
         if row and not row.is_manual:
             raw = panel.get(panel_key)
             if raw is not None:
-                value = f"{raw / 1000:.2f}s" if is_ms and isinstance(raw, (int, float)) else str(raw)
-                mobile.append([key, value, row.rating])
+                if is_ms and isinstance(raw, (int, float)):
+                    value = f"{fmt_num(raw / 1000)}s"
+                else:
+                    value = fmt_num(raw)
+                mobile.append([key, value, row.rating, _cwv_recommendation(row, page_url=page_url)])
 
     load_mobile = by_name.get("Page load speed - Mobile")
     load_desktop = by_name.get("Page load speed - Desktop")
     if load_mobile and not load_mobile.is_manual:
         score = _lighthouse_score(load_mobile)
-        mobile.append(["Lighthouse performance", score or "—", load_mobile.rating])
+        mobile.append(
+            [
+                "Lighthouse performance",
+                score or "—",
+                load_mobile.rating,
+                _cwv_recommendation(load_mobile, page_url=page_url),
+            ]
+        )
     if load_desktop and not load_desktop.is_manual:
         score = _lighthouse_score(load_desktop)
-        desktop.append(["Lighthouse performance", score or "—", load_desktop.rating])
+        desktop.append(
+            [
+                "Lighthouse performance",
+                score or "—",
+                load_desktop.rating,
+                _cwv_recommendation(load_desktop, page_url=page_url),
+            ]
+        )
 
     delta = by_name.get("Mobile vs Desktop traffic split")
     if delta and not delta.is_manual:
         d_perf = _detail_field(delta.detail, "desktop perf")
         if d_perf and not desktop:
-            desktop.append(["Lighthouse performance", d_perf, delta.rating])
+            desktop.append(
+                [
+                    "Lighthouse performance",
+                    d_perf,
+                    delta.rating,
+                    _cwv_recommendation(delta, page_url=page_url),
+                ]
+            )
 
     if not mobile and not desktop:
         return {}
@@ -1381,12 +1542,23 @@ def _issue_count(row: ResolvedRow) -> int:
     return 0
 
 
-def _audit_issue_lines(rows: list[ResolvedRow]) -> list[tuple[str, str, str]]:
-    lines: list[tuple[str, str, str]] = []
+def _audit_issue_lines(
+    rows: list[ResolvedRow],
+    *,
+    seo: Report | None = None,
+    page_url: str = "",
+) -> list[tuple[str, str, str, str]]:
+    index: dict[str, ParameterResult] = {}
+    if seo is not None:
+        for category in seo.categories:
+            for param in category.parameters:
+                index[param.name] = param
+    lines: list[tuple[str, str, str, str]] = []
     for row in rows:
         count = _issue_count(row)
         label = _audit_issue_label(row.name, count)
-        lines.append((label, str(count), "0"))
+        fix = _resolved_fix(row, index, page_url=page_url) if count else ""
+        lines.append((label, str(count), "0", fix))
     return lines
 
 
@@ -1442,6 +1614,26 @@ def _trend_chart_label(audited_at: datetime) -> str:
     return audited_at.strftime("%d %b").lstrip("0")
 
 
+def _friendly_gsc_keyword_message(error: str) -> str:
+    """Short client-facing copy instead of raw Google API exception text."""
+    lower = (error or "").lower()
+    if "sufficient permission" in lower or "forbidden" in lower or "403" in lower:
+        return (
+            "Keyword data unavailable: the connected Google account does not have access "
+            "to this Search Console property. Grant access in GSC (or reconnect OAuth with "
+            "the correct property) and re-run the audit."
+        )
+    if "not found" in lower or "404" in lower:
+        return (
+            "Keyword data unavailable: this site was not found in Google Search Console "
+            "for the connected account. Verify the property URL matches GSC exactly."
+        )
+    return (
+        "Keyword data unavailable from Google Search Console for this property right now. "
+        "Confirm GSC access and try again."
+    )
+
+
 def _append_site_audit_trend_charts(story: list, domain: str, st: dict) -> None:
     """Render Semrush-style trend mini charts from SQLite audit history."""
     settings = get_settings()
@@ -1463,29 +1655,40 @@ def _append_site_audit_trend_charts(story: list, domain: str, st: dict) -> None:
     labels = [_trend_chart_label(s.audited_at) for s in history]
     specs = [
         ("Site Health", [s.site_health for s in history], "%"),
-        ("Errors", [float(s.errors) for s in history], ""),
-        ("Warnings", [float(s.warnings) for s in history], ""),
-        ("Notices", [float(s.notices) for s in history], ""),
+        ("Errors", [float(s.errors) for s in history], "Count"),
+        ("Warnings", [float(s.warnings) for s in history], "Count"),
+        ("Notices", [float(s.notices) for s in history], "Count"),
     ]
+    usable = PAGE_SIZE[0] - 2 * MARGIN
+    col_w = (usable - 6) / 2
     images: list = []
     for title, values, ylabel in specs:
         png = mini_line_chart(title, labels, values, ylabel=ylabel)
         if png:
-            images.append(chart_image(png, height_ratio=0.2))
+            images.append(chart_image(png, width=col_w))
 
     if not images:
         return
 
     story.append(Spacer(1, 0.1 * inch))
     story.append(Paragraph("Site audit trends", st["audit_h2"]))
-    usable = PAGE_SIZE[0] - 2 * MARGIN
-    col_w = usable / 2
     while len(images) < 4:
         images.append(Spacer(1, 0.01 * inch))
     grid = Table(
         [[images[0], images[1]], [images[2], images[3]]],
-        colWidths=[col_w, col_w],
+        colWidths=[col_w + 3, col_w + 3],
         hAlign="LEFT",
+    )
+    grid.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
     )
     story.append(grid)
 
@@ -1496,8 +1699,9 @@ def _append_site_audit_trend_charts(story: list, domain: str, st: dict) -> None:
         ylabel="Pages",
     )
     if crawled_png:
-        story.append(Spacer(1, 0.06 * inch))
-        story.append(chart_image(crawled_png, height_ratio=0.18))
+        story.append(Spacer(1, 0.08 * inch))
+        # Full-width but aspect-preserving (no horizontal stretch)
+        story.append(chart_image(crawled_png, width=usable * 0.72))
 
 
 def _site_health_score(seo: Report, by_name: dict[str, ResolvedRow]) -> float:
@@ -1561,7 +1765,7 @@ def _redirect_share(by_name: dict[str, ResolvedRow], crawled: int) -> str:
     redirected = int(_redirected_pages(by_name))
     if crawled <= 0:
         return "0%"
-    return f"{redirected / crawled * 100:.1f}%"
+    return fmt_pct((redirected / crawled * 100) if crawled else 0)
 
 
 def _ai_blocked_stats(by_name: dict[str, ResolvedRow], crawled: int) -> tuple[float, int]:
@@ -1609,11 +1813,23 @@ def _ai_bot_rows(by_name: dict[str, ResolvedRow]) -> list[list[str]]:
     return out
 
 
-def _ai_top_issues(by_name: dict[str, ResolvedRow]) -> list[list[str]]:
-    issues: list[list[str]] = []
+def _ai_top_issues(
+    by_name: dict[str, ResolvedRow],
+    *,
+    page_url: str = "",
+) -> list[tuple[str, str, str, str]]:
+    issues: list[tuple[str, str, str, str]] = []
     for row in by_name.values():
         if row.is_manual:
             continue
         if row.rating == "Not Meeting":
-            issues.append([row.name, row.section if row.section != "AI Search" else "Error", "1"])
+            fix = _resolved_fix(row, page_url=page_url)
+            issues.append(
+                (
+                    row.name,
+                    row.section if row.section != "AI Search" else "Error",
+                    "1",
+                    fix,
+                )
+            )
     return issues[:10]

@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 from app.agents.base import AgentContext, BaseAgent, audit_score, manual, not_measured, scored
 from app.agents.geo_agents import AiBotCrawlabilityAgent
-from app.crawl import registrable_host
+from app.crawl import is_reportable_http_error, registrable_host
 from app.internal_link_distribution import (
     compute_internal_link_distribution,
     count_single_inlink_pages,
@@ -200,12 +200,12 @@ class SiteAuditSupplementAgent(BaseAgent):
         broken_internal_images = [
             url
             for url, status in page.image_status.items()
-            if status >= 400 and registrable_host(urlparse(url).netloc) == page_host
+            if is_reportable_http_error(status) and registrable_host(urlparse(url).netloc) == page_host
         ]
         broken_external_images = [
             url
             for url, status in page.image_status.items()
-            if status >= 400 and registrable_host(urlparse(url).netloc) != page_host
+            if is_reportable_http_error(status) and registrable_host(urlparse(url).netloc) != page_host
         ]
         results.append(
             scored(
@@ -233,12 +233,12 @@ class SiteAuditSupplementAgent(BaseAgent):
         broken_internal_assets = [
             url
             for url, status in page.asset_status.items()
-            if status >= 400 and registrable_host(urlparse(url).netloc) == page_host
+            if is_reportable_http_error(status) and registrable_host(urlparse(url).netloc) == page_host
         ]
         broken_external_assets = [
             url
             for url, status in page.asset_status.items()
-            if status >= 400 and registrable_host(urlparse(url).netloc) != page_host
+            if is_reportable_http_error(status) and registrable_host(urlparse(url).netloc) != page_host
         ]
         results.append(
             scored(
@@ -316,7 +316,6 @@ class SiteAuditSupplementAgent(BaseAgent):
                 weight=_W,
             )
         )
-        crawl_errors = [f for f in page.crawl_failures if f.get("reason") != "unreachable" or not page.dns_ok]
         results.append(
             scored(
                 "Crawl failures",
@@ -326,6 +325,52 @@ class SiteAuditSupplementAgent(BaseAgent):
                 method=DetectionMethod.CRAWL,
                 detail=f"failures={len(page.crawl_failures)}",
                 evidence={"sample": page.crawl_failures[:3]},
+                weight=_W,
+            )
+        )
+        # Dedicated 4xx/5xx inventory for Full Site Audit (excludes Cloudflare bot-block probes).
+        combined_status = {**page.link_status, **page.crawl_page_status}
+        status_4xx = {
+            u: s
+            for u, s in combined_status.items()
+            if is_reportable_http_error(s) and 400 <= s < 500
+        }
+        status_5xx = {
+            u: s
+            for u, s in combined_status.items()
+            if is_reportable_http_error(s) and s >= 500
+        }
+        results.append(
+            scored(
+                "Pages returned 4XX status code",
+                "Internal pages do not return HTTP 4xx",
+                meeting=len(status_4xx) == 0,
+                partial=0 < len(status_4xx) <= 2,
+                method=DetectionMethod.CRAWL,
+                detail=f"count={len(status_4xx)}",
+                evidence={
+                    "count": len(status_4xx),
+                    "sample": list(status_4xx.keys())[:10],
+                    "statuses": {u: status_4xx[u] for u in list(status_4xx)[:10]},
+                },
+                recommendation="Fix or remove internal URLs that return real HTTP 4xx responses.",
+                weight=_W,
+            )
+        )
+        results.append(
+            scored(
+                "Pages returned 5XX status code",
+                "Internal pages do not return HTTP 5xx",
+                meeting=len(status_5xx) == 0,
+                partial=0 < len(status_5xx) <= 2,
+                method=DetectionMethod.CRAWL,
+                detail=f"count={len(status_5xx)}",
+                evidence={
+                    "count": len(status_5xx),
+                    "sample": list(status_5xx.keys())[:10],
+                    "statuses": {u: status_5xx[u] for u in list(status_5xx)[:10]},
+                },
+                recommendation="Investigate origin/server errors for URLs returning HTTP 5xx.",
                 weight=_W,
             )
         )
@@ -461,7 +506,9 @@ class SiteAuditSupplementAgent(BaseAgent):
             )
         )
         bad_sitemap = [
-            url for url, status in sitemap.loc_status.items() if status == 0 or status >= 400
+            url
+            for url, status in sitemap.loc_status.items()
+            if status == 0 or is_reportable_http_error(status)
         ]
         results.append(
             scored(
@@ -696,7 +743,7 @@ class SiteAuditSupplementAgent(BaseAgent):
         broken = sum(
             1
             for status in page.crawl_page_status.values()
-            if status == 0 or status >= 500
+            if status == 0 or (is_reportable_http_error(status) and status >= 500)
         )
         redirected = sum(1 for status in page.crawl_page_status.values() if 300 <= status < 400)
         have_issues = min(crawled, issue_count)

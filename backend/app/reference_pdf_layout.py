@@ -1,8 +1,11 @@
-"""Shared ReportLab layout primitives matching the three reference PDF styles."""
+"""Shared ReportLab layout primitives — Semrush-like HeuristicsAI LLC report chrome."""
 
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
+from io import BytesIO
+from pathlib import Path
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
@@ -10,8 +13,6 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch, mm
-from io import BytesIO
-
 from reportlab.platypus import Flowable, Image, Paragraph, Spacer, Table, TableStyle
 
 from app.scoring import grade_for_score
@@ -19,30 +20,48 @@ from app.scoring import grade_for_score
 PAGE_SIZE = A4
 MARGIN = 18 * mm
 
-HEURISTICS_ORANGE = colors.HexColor("#2563EB")
-HEURISTICS_TEXT = colors.HexColor("#1A1A1A")
+# Semrush-like HeuristicsAI palette
+KPI_BLUE = colors.HexColor("#2AB3FF")
+HEURISTICS_ORANGE = KPI_BLUE  # accent used by bars / links
+HEURISTICS_TEXT = colors.HexColor("#222222")
 HEURISTICS_MUTED = colors.HexColor("#767676")
-HEURISTICS_LINE = colors.HexColor("#E0E0E0")
-BASELINE_TITLE = colors.HexColor("#1A1A1A")
-BASELINE_MUTED = colors.HexColor("#5C5C5C")
+HEURISTICS_LINE = colors.HexColor("#E5E7EB")
+BASELINE_TITLE = colors.HexColor("#222222")
+BASELINE_MUTED = colors.HexColor("#767676")
+TABLE_HEADER_BG = colors.HexColor("#F7F8F8")
+TABLE_HEADER_FG = colors.HexColor("#333333")
+TABLE_ZEBRA = colors.HexColor("#FBFBFB")
+TABLE_GRID = colors.HexColor("#E8E8E8")
+TABLE_RULE = colors.HexColor("#E5E7EB")
 
-HEURISTICS_BRAND = "HEURISTICS AI SOLUTIONS LLC"
+HEURISTICS_BRAND = "HeuristicsAI LLC"
 HEURISTICS_WEB = "WWW.HEURISTICSAISOLUTIONS.COM"
+FOOTER_ATTRIBUTION = "The report data is prepared by HeuristicsAI LLC"
 
 SEVERITY_ERROR = colors.HexColor("#DC2626")
 SEVERITY_WARNING = colors.HexColor("#EA580C")
 SEVERITY_NOTICE = colors.HexColor("#CA8A04")
+SEVERITY_OK = colors.HexColor("#16A34A")
 
 SCORE_GOOD = colors.HexColor("#2ECC71")
 SCORE_WARN = colors.HexColor("#F1C40F")
 SCORE_BAD = colors.HexColor("#E74C3C")
 SCORE_WARN_TEXT = colors.HexColor("#222222")
 
+_ASSETS = Path(__file__).resolve().parent / "assets"
+LOGO_PATH = _ASSETS / "ha-brand-mark-256.png"
+LOGO_HEADER_PATH = _ASSETS / "ha-brand-mark-96.png"
+# Fall back to full-resolution mark if resized assets are missing
+if not LOGO_PATH.exists():
+    LOGO_PATH = _ASSETS / "ha-brand-mark.png"
+if not LOGO_HEADER_PATH.exists():
+    LOGO_HEADER_PATH = LOGO_PATH
+
 HEADER_TEXT_TOP = 10 * mm
 HEADER_TEXT_SECOND = 14 * mm
-HEADER_RULE_Y = 19 * mm
-CONTENT_TOP_MARGIN = 24 * mm
-CONTENT_BOTTOM_MARGIN = 16 * mm
+HEADER_RULE_Y = 20 * mm
+CONTENT_TOP_MARGIN = 26 * mm
+CONTENT_BOTTOM_MARGIN = 18 * mm
 
 
 def para(text: str) -> str:
@@ -55,38 +74,41 @@ def styles() -> dict[str, ParagraphStyle]:
         "baseline_cover_title": ParagraphStyle(
             "baseline_cover_title",
             parent=base["Normal"],
-            fontSize=28,
-            leading=34,
+            fontSize=26,
+            leading=32,
             alignment=TA_CENTER,
             textColor=BASELINE_TITLE,
             spaceAfter=10,
+            fontName="Helvetica",
         ),
         "baseline_cover_sub": ParagraphStyle(
             "baseline_cover_sub",
             parent=base["Normal"],
-            fontSize=14,
-            leading=18,
+            fontSize=12,
+            leading=16,
             alignment=TA_CENTER,
             textColor=BASELINE_MUTED,
-            spaceAfter=8,
+            spaceAfter=6,
         ),
         "section_title": ParagraphStyle(
             "section_title",
             parent=base["Heading2"],
-            fontSize=16,
-            leading=20,
+            fontSize=15,
+            leading=19,
             textColor=BASELINE_TITLE,
-            spaceBefore=6,
-            spaceAfter=10,
+            spaceBefore=8,
+            spaceAfter=12,
+            fontName="Helvetica",
         ),
         "subsection": ParagraphStyle(
             "subsection",
             parent=base["Heading3"],
-            fontSize=12,
-            leading=15,
+            fontSize=11,
+            leading=14,
             textColor=BASELINE_TITLE,
-            spaceBefore=4,
-            spaceAfter=4,
+            spaceBefore=6,
+            spaceAfter=6,
+            fontName="Helvetica",
         ),
         "body": ParagraphStyle(
             "body",
@@ -107,16 +129,34 @@ def styles() -> dict[str, ParagraphStyle]:
         "cell": ParagraphStyle(
             "cell",
             parent=base["Normal"],
-            fontSize=8,
-            leading=10,
+            fontSize=8.5,
+            leading=11,
             alignment=TA_LEFT,
             textColor=BASELINE_TITLE,
+        ),
+        "cell_header": ParagraphStyle(
+            "cell_header",
+            parent=base["Normal"],
+            fontSize=8,
+            leading=11,
+            alignment=TA_LEFT,
+            textColor=TABLE_HEADER_FG,
+            fontName="Helvetica-Bold",
+        ),
+        "cell_header_center": ParagraphStyle(
+            "cell_header_center",
+            parent=base["Normal"],
+            fontSize=8,
+            leading=11,
+            alignment=TA_CENTER,
+            textColor=TABLE_HEADER_FG,
+            fontName="Helvetica-Bold",
         ),
         "cell_center": ParagraphStyle(
             "cell_center",
             parent=base["Normal"],
-            fontSize=8,
-            leading=10,
+            fontSize=8.5,
+            leading=11,
             alignment=TA_CENTER,
             textColor=BASELINE_TITLE,
         ),
@@ -127,14 +167,67 @@ def styles() -> dict[str, ParagraphStyle]:
             leading=11,
             alignment=TA_LEFT,
             textColor=BASELINE_MUTED,
+            spaceAfter=2,
         ),
         "kpi_value": ParagraphStyle(
             "kpi_value",
             parent=base["Normal"],
-            fontSize=20,
-            leading=24,
+            fontSize=22,
+            leading=26,
             alignment=TA_LEFT,
-            textColor=BASELINE_TITLE,
+            textColor=KPI_BLUE,
+            fontName="Helvetica",
+        ),
+        "score_label": ParagraphStyle(
+            "score_label",
+            parent=base["Normal"],
+            fontSize=10,
+            leading=13,
+            textColor=BASELINE_MUTED,
+            spaceAfter=2,
+        ),
+        "score_value": ParagraphStyle(
+            "score_value",
+            parent=base["Normal"],
+            fontSize=36,
+            leading=40,
+            textColor=KPI_BLUE,
+            fontName="Helvetica",
+            spaceAfter=8,
+        ),
+        "issue_name": ParagraphStyle(
+            "issue_name",
+            parent=base["Normal"],
+            fontSize=9.5,
+            leading=13,
+            textColor=HEURISTICS_TEXT,
+            spaceAfter=2,
+        ),
+        "issue_name_ok": ParagraphStyle(
+            "issue_name_ok",
+            parent=base["Normal"],
+            fontSize=9.5,
+            leading=13,
+            textColor=SEVERITY_OK,
+            spaceAfter=2,
+        ),
+        "issue_count": ParagraphStyle(
+            "issue_count",
+            parent=base["Normal"],
+            fontSize=14,
+            leading=16,
+            alignment=TA_RIGHT,
+            textColor=HEURISTICS_TEXT,
+            fontName="Helvetica",
+        ),
+        "issue_fix": ParagraphStyle(
+            "issue_fix",
+            parent=base["Normal"],
+            fontSize=8,
+            leading=11,
+            textColor=BASELINE_MUTED,
+            spaceBefore=2,
+            spaceAfter=4,
         ),
         "audit_cover_title": ParagraphStyle(
             "audit_cover_title",
@@ -148,8 +241,8 @@ def styles() -> dict[str, ParagraphStyle]:
         "audit_cover_domain": ParagraphStyle(
             "audit_cover_domain",
             parent=base["Normal"],
-            fontSize=14,
-            leading=18,
+            fontSize=13,
+            leading=17,
             alignment=TA_CENTER,
             textColor=HEURISTICS_MUTED,
             spaceAfter=8,
@@ -166,46 +259,48 @@ def styles() -> dict[str, ParagraphStyle]:
         "audit_h1": ParagraphStyle(
             "audit_h1",
             parent=base["Heading1"],
-            fontSize=18,
-            leading=22,
+            fontSize=16,
+            leading=20,
             textColor=HEURISTICS_TEXT,
-            spaceAfter=8,
+            spaceAfter=10,
+            fontName="Helvetica",
         ),
         "audit_h2": ParagraphStyle(
             "audit_h2",
             parent=base["Heading2"],
-            fontSize=14,
-            leading=18,
-            textColor=HEURISTICS_ORANGE,
-            spaceBefore=4,
-            spaceAfter=6,
+            fontSize=12,
+            leading=16,
+            textColor=HEURISTICS_TEXT,
+            spaceBefore=6,
+            spaceAfter=8,
+            fontName="Helvetica",
         ),
         "audit_h2_error": ParagraphStyle(
             "audit_h2_error",
             parent=base["Heading2"],
-            fontSize=14,
-            leading=18,
+            fontSize=12,
+            leading=16,
             textColor=SEVERITY_ERROR,
-            spaceBefore=4,
-            spaceAfter=6,
+            spaceBefore=6,
+            spaceAfter=8,
         ),
         "audit_h2_warning": ParagraphStyle(
             "audit_h2_warning",
             parent=base["Heading2"],
-            fontSize=14,
-            leading=18,
+            fontSize=12,
+            leading=16,
             textColor=SEVERITY_WARNING,
-            spaceBefore=4,
-            spaceAfter=6,
+            spaceBefore=6,
+            spaceAfter=8,
         ),
         "audit_h2_notice": ParagraphStyle(
             "audit_h2_notice",
             parent=base["Heading2"],
-            fontSize=14,
-            leading=18,
+            fontSize=12,
+            leading=16,
             textColor=SEVERITY_NOTICE,
-            spaceBefore=4,
-            spaceAfter=6,
+            spaceBefore=6,
+            spaceAfter=8,
         ),
         "audit_body": ParagraphStyle(
             "audit_body",
@@ -218,64 +313,64 @@ def styles() -> dict[str, ParagraphStyle]:
         "audit_issue": ParagraphStyle(
             "audit_issue",
             parent=base["Normal"],
-            fontSize=9,
-            leading=12,
+            fontSize=9.5,
+            leading=13,
             textColor=HEURISTICS_TEXT,
             spaceAfter=2,
         ),
         "audit_issue_error": ParagraphStyle(
             "audit_issue_error",
             parent=base["Normal"],
-            fontSize=9,
-            leading=12,
+            fontSize=9.5,
+            leading=13,
             textColor=SEVERITY_ERROR,
             spaceAfter=2,
         ),
         "audit_issue_warning": ParagraphStyle(
             "audit_issue_warning",
             parent=base["Normal"],
-            fontSize=9,
-            leading=12,
+            fontSize=9.5,
+            leading=13,
             textColor=SEVERITY_WARNING,
             spaceAfter=2,
         ),
         "cell_error": ParagraphStyle(
             "cell_error",
             parent=base["Normal"],
-            fontSize=8,
-            leading=10,
+            fontSize=8.5,
+            leading=11,
             alignment=TA_LEFT,
             textColor=SEVERITY_ERROR,
         ),
         "cell_warning": ParagraphStyle(
             "cell_warning",
             parent=base["Normal"],
-            fontSize=8,
-            leading=10,
+            fontSize=8.5,
+            leading=11,
             alignment=TA_LEFT,
             textColor=SEVERITY_WARNING,
         ),
         "cell_notice": ParagraphStyle(
             "cell_notice",
             parent=base["Normal"],
-            fontSize=8,
-            leading=10,
+            fontSize=8.5,
+            leading=11,
             alignment=TA_LEFT,
             textColor=SEVERITY_NOTICE,
         ),
         "cell_center_error": ParagraphStyle(
             "cell_center_error",
             parent=base["Normal"],
-            fontSize=8,
-            leading=10,
+            fontSize=8.5,
+            leading=11,
             alignment=TA_CENTER,
             textColor=SEVERITY_ERROR,
         ),
         "cell_center_warning": ParagraphStyle(
             "cell_center_warning",
             parent=base["Normal"],
-            fontSize=8,
-            leading=10,
+            fontSize=8.5,
+            leading=11,
             alignment=TA_CENTER,
             textColor=SEVERITY_WARNING,
         ),
@@ -292,8 +387,8 @@ def styles() -> dict[str, ParagraphStyle]:
         "baseline_cover_brand": ParagraphStyle(
             "baseline_cover_brand",
             parent=base["Normal"],
-            fontSize=9,
-            leading=12,
+            fontSize=8,
+            leading=11,
             alignment=TA_CENTER,
             textColor=BASELINE_MUTED,
             spaceAfter=4,
@@ -301,8 +396,8 @@ def styles() -> dict[str, ParagraphStyle]:
         "appendix_title": ParagraphStyle(
             "appendix_title",
             parent=base["Heading2"],
-            fontSize=13,
-            leading=16,
+            fontSize=12,
+            leading=15,
             textColor=BASELINE_TITLE,
             spaceBefore=14,
             spaceAfter=8,
@@ -310,34 +405,74 @@ def styles() -> dict[str, ParagraphStyle]:
         "summary_title": ParagraphStyle(
             "summary_title",
             parent=base["Heading1"],
-            fontSize=18,
-            leading=22,
+            fontSize=16,
+            leading=20,
             textColor=BASELINE_TITLE,
             spaceAfter=6,
+            fontName="Helvetica",
         ),
         "summary_scores": ParagraphStyle(
             "summary_scores",
             parent=base["Normal"],
             fontSize=10,
             leading=13,
-            textColor=HEURISTICS_ORANGE,
+            textColor=KPI_BLUE,
             spaceAfter=8,
+        ),
+        "key_metric": ParagraphStyle(
+            "key_metric",
+            parent=base["Normal"],
+            fontSize=14,
+            leading=19,
+            textColor=HEURISTICS_TEXT,
+            fontName="Helvetica-Bold",
+            spaceAfter=4,
+        ),
+        "key_metric_label": ParagraphStyle(
+            "key_metric_label",
+            parent=base["Normal"],
+            fontSize=11,
+            leading=14,
+            textColor=HEURISTICS_TEXT,
+            fontName="Helvetica-Bold",
+            spaceAfter=3,
         ),
     }
 
 
 def section_spacer() -> Spacer:
     """Gap between major report sections (avoids forced page breaks)."""
-    return Spacer(1, 0.22 * inch)
+    return Spacer(1, 0.28 * inch)
 
 
 def subsection_spacer() -> Spacer:
     """Gap between subsections within a report page."""
-    return Spacer(1, 0.18 * inch)
+    return Spacer(1, 0.2 * inch)
 
 
 DEFAULT_BADGE_DIAMETER = 0.68 * inch
 LARGE_BADGE_DIAMETER = 0.92 * inch
+
+
+def brand_logo_image(*, width: float = 0.95 * inch) -> Image:
+    """Centered HeuristicsAI brand mark for covers."""
+    img = Image(str(LOGO_PATH), width=width, height=width)
+    img.hAlign = "CENTER"
+    return img
+
+
+def _draw_logo_on_canvas(canvas, *, x: float, y: float, size: float = 11 * mm) -> None:
+    path = LOGO_HEADER_PATH if LOGO_HEADER_PATH.exists() else LOGO_PATH
+    if path.exists():
+        canvas.drawImage(
+            str(path),
+            x,
+            y,
+            width=size,
+            height=size,
+            mask="auto",
+            preserveAspectRatio=True,
+        )
 
 
 def _grade_fill_and_text(grade: str) -> tuple[colors.Color, colors.Color]:
@@ -349,7 +484,7 @@ def _grade_fill_and_text(grade: str) -> tuple[colors.Color, colors.Color]:
 
 
 class ScoreBadge(Flowable):
-    """Circular grade + score badge matching the web UI score header."""
+    """Circular grade + score badge (legacy; supplementary PDFs use large % scores)."""
 
     def __init__(self, score: float, grade: str | None = None, *, diameter: float = DEFAULT_BADGE_DIAMETER):
         super().__init__()
@@ -376,9 +511,23 @@ class ScoreBadge(Flowable):
         letter_w = canvas.stringWidth(self.grade, "Helvetica-Bold", self.letter_pt)
         canvas.drawString(radius - letter_w / 2, radius + 1, self.grade)
         canvas.setFont("Helvetica", self.score_pt)
-        score_text = f"{int(round(self.score))}/100"
+        score_text = f"{float(self.score):.2f}/100"
         score_w = canvas.stringWidth(score_text, "Helvetica", self.score_pt)
         canvas.drawString(radius - score_w / 2, radius - self.letter_pt * 0.55, score_text)
+
+
+def score_display_block(
+    badges: list[tuple[str, float, str | None]],
+    st: dict,
+) -> list:
+    """Large Semrush-style score percentages (label + big number)."""
+    flow: list = []
+    for index, (label, score, _grade) in enumerate(badges):
+        if index:
+            flow.append(Spacer(1, 0.12 * inch))
+        flow.append(Paragraph(para(label), st["score_label"]))
+        flow.append(Paragraph(f"{float(score):.0f}%", st["score_value"]))
+    return flow
 
 
 def score_badge_inline(
@@ -389,7 +538,7 @@ def score_badge_inline(
     grade: str | None = None,
     diameter: float = LARGE_BADGE_DIAMETER,
 ) -> Table:
-    """Label left-aligned beside a score badge (matches the web score header layout)."""
+    """Label left-aligned beside a score badge (legacy layout helper)."""
     badge = ScoreBadge(score, grade, diameter=diameter)
     label_para = Paragraph(f"<b>{para(label)}</b>", st["summary_scores"])
     table = Table(
@@ -419,13 +568,8 @@ def score_badges_block(
     *,
     diameter: float = LARGE_BADGE_DIAMETER,
 ) -> list:
-    """One or more label-left score badges, stacked when multiple."""
-    flow: list = []
-    for index, (label, score, grade) in enumerate(badges):
-        if index:
-            flow.append(Spacer(1, 0.1 * inch))
-        flow.append(score_badge_inline(label, score, st, grade=grade, diameter=diameter))
-    return flow
+    """Prefer large % display for supplementary Semrush-like PDFs."""
+    return score_display_block(badges, st)
 
 
 def count_paragraph(value: str, severity: str | None, st: dict, *, center: bool = True) -> Paragraph:
@@ -461,7 +605,7 @@ def issue_resolution_bullets(
     action_items: list[tuple[str, str, str]],
     st: dict,
 ) -> list:
-    """Bulleted issue + resolution list for executive overview."""
+    """Bulleted issue + developer resolution list for executive overview."""
     flow: list = []
     for issue, severity, fix in action_items:
         color = "#DC2626"
@@ -469,11 +613,13 @@ def issue_resolution_bullets(
             color = "#EA580C"
         elif severity.lower() in ("notice", "notices"):
             color = "#CA8A04"
+        fix_label = "Developer fix" if "Where:" in (fix or "") else "Resolution"
         flow.append(
             Paragraph(
                 f"<bullet>&bull;</bullet> "
                 f'<font color="{color}"><b>{para(issue)}</b> ({para(severity)})</font><br/>'
-                f"&nbsp;&nbsp;&nbsp;&nbsp;<b>Resolution:</b> {para(fix)}",
+                f"&nbsp;&nbsp;&nbsp;&nbsp;<b>{fix_label}:</b><br/>"
+                f"&nbsp;&nbsp;&nbsp;&nbsp;{para(fix)}",
                 st["bullet_item"],
             )
         )
@@ -508,34 +654,55 @@ class AuditPageMarker(Flowable):
         self.canv._doctemplateAttr("audit_page", True)  # type: ignore[attr-defined]
 
 
-def baseline_cover(st: dict, range_label: str, generated_label: str, *, domain: str = "") -> list:
-    subtitle = f"Prepared for {domain}" if domain else "Client Performance Report"
-    return [
-        Spacer(1, 1.8 * inch),
-        Paragraph("Performance Baseline", st["baseline_cover_title"]),
-        Paragraph("Traffic, Engagement, SEO &amp; Web Vitals", st["baseline_cover_sub"]),
-        Paragraph(para(subtitle), st["baseline_cover_sub"]),
-        Paragraph(para(range_label), st["baseline_cover_sub"]),
-        Paragraph(para(generated_label), st["baseline_cover_sub"]),
-        Spacer(1, 0.3 * inch),
-        Paragraph(para(f"{HEURISTICS_BRAND} · {HEURISTICS_WEB}"), st["baseline_cover_brand"]),
+def semrush_cover(
+    st: dict,
+    *,
+    title: str,
+    lines: list[str],
+    generated_label: str,
+) -> list:
+    """Centered Semrush-like cover: logo, title, meta lines, generated date."""
+    flow: list = [
+        Spacer(1, 1.35 * inch),
+        brand_logo_image(width=1.05 * inch),
+        Spacer(1, 0.55 * inch),
+        Paragraph(para(title), st["baseline_cover_title"]),
+        Spacer(1, 0.15 * inch),
     ]
+    for line in lines:
+        if line:
+            flow.append(Paragraph(para(line), st["baseline_cover_sub"]))
+    flow.append(Spacer(1, 2.2 * inch))
+    flow.append(Paragraph(para(generated_label), st["baseline_cover_brand"]))
+    flow.append(Paragraph(para(f"{HEURISTICS_BRAND} · {HEURISTICS_WEB}"), st["baseline_cover_brand"]))
+    return flow
+
+
+def baseline_cover(st: dict, range_label: str, generated_label: str, *, domain: str = "") -> list:
+    lines = [
+        "Traffic, Engagement, SEO & Web Vitals",
+        f"Prepared for {domain}" if domain else "Client Performance Report",
+        range_label,
+    ]
+    return semrush_cover(
+        st,
+        title="Performance Baseline",
+        lines=lines,
+        generated_label=generated_label,
+    )
 
 
 def audit_cover(st: dict, title: str, domain: str, generated_label: str) -> list:
-    return [
-        Spacer(1, 2.0 * inch),
-        Paragraph(para(title), st["audit_cover_title"]),
-        Paragraph(para(domain), st["audit_cover_domain"]),
-        Paragraph(para("Prepared for client review"), st["audit_cover_sub"]),
-        Paragraph(para(generated_label), st["audit_cover_sub"]),
-        Spacer(1, 0.25 * inch),
-        Paragraph(para(f"{HEURISTICS_BRAND} · {HEURISTICS_WEB}"), st["baseline_cover_brand"]),
-    ]
+    return semrush_cover(
+        st,
+        title=title,
+        lines=[domain, "Prepared for client review"],
+        generated_label=generated_label,
+    )
 
 
 def kpi_grid(items: list[tuple[str, str]], st: dict, cols: int = 3) -> Table:
-    """Render KPI label/value pairs in a grid like the baseline Overview page."""
+    """Unboxed Semrush-style KPI grid: muted labels + large blue values."""
     cells: list = []
     row: list = []
     for label, value in items:
@@ -561,17 +728,14 @@ def kpi_grid(items: list[tuple[str, str]], st: dict, cols: int = 3) -> Table:
 
     col_w = (PAGE_SIZE[0] - 2 * MARGIN) / (cols * 2)
     table = Table(cells, colWidths=[col_w] * (cols * 2), hAlign="LEFT")
-    border = colors.HexColor("#BFBFBF")
     table.setStyle(
         TableStyle(
             [
-                ("GRID", (0, 0), (-1, -1), 0.5, border),
-                ("BOX", (0, 0), (-1, -1), 0.75, border),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("TOPPADDING", (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
                 ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
             ]
         )
     )
@@ -591,9 +755,11 @@ def data_table(
     usable = PAGE_SIZE[0] - 2 * MARGIN
     if not col_widths:
         col_widths = [usable / len(headers)] * len(headers)
-    table_data = [
-        [Paragraph(f"<b>{para(h)}</b>", st["cell"]) for h in headers],
-    ]
+    header_cells = []
+    for idx, h in enumerate(headers):
+        style_key = "cell_header_center" if idx in center_cols else "cell_header"
+        header_cells.append(Paragraph(para(h), st[style_key]))
+    table_data = [header_cells]
     for row in rows:
         cells: list = []
         for idx, cell in enumerate(row):
@@ -604,7 +770,7 @@ def data_table(
                 cells.append(Paragraph(para(str(cell)), st[style_key]))
         table_data.append(cells)
     table = Table(table_data, colWidths=col_widths, repeatRows=1, hAlign="LEFT")
-    table.setStyle(_baseline_table_style())
+    table.setStyle(_professional_table_style(len(table_data)))
     return table
 
 
@@ -618,8 +784,8 @@ def issue_counts_table(
     col_widths = col_widths or [2.5 * inch, 1.0 * inch]
     table_data = [
         [
-            Paragraph("<b></b>", st["cell"]),
-            Paragraph("<b>Count</b>", st["cell_center"]),
+            Paragraph("", st["cell_header"]),
+            Paragraph("Count", st["cell_header_center"]),
         ]
     ]
     for label, count, severity in rows:
@@ -630,59 +796,81 @@ def issue_counts_table(
             ]
         )
     table = Table(table_data, colWidths=col_widths, repeatRows=1, hAlign="LEFT")
-    table.setStyle(_baseline_table_style())
+    table.setStyle(_professional_table_style(len(table_data)))
     return table
 
 
+def _format_developer_fix_html(fix: str) -> str:
+    """Render Where/Change/Evidence lines with muted labels for readability."""
+    if not (fix or "").strip():
+        return ""
+    parts: list[str] = []
+    for line in fix.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        for prefix in ("Where:", "Change:", "Evidence:", "Affected URLs:", "Effort:"):
+            if line.startswith(prefix):
+                rest = line[len(prefix) :].strip()
+                parts.append(f"<b>{escape(prefix)}</b> {escape(rest)}")
+                break
+        else:
+            parts.append(escape(line))
+    return "<br/>".join(parts)
+
+
 def audit_issue_table(
-    rows: list[tuple[str, str, str]],
+    rows: list[tuple],
     st: dict,
     *,
     severity: str = "error",
 ) -> Table:
-    """HeuristicsAI audit issue list: description | count | delta."""
-    issue_style = {
-        "error": "audit_issue_error",
-        "warning": "audit_issue_warning",
-        "notice": "audit_issue",
-    }.get(severity.lower(), "audit_issue")
+    """Semrush-like hairline issue list with full Where / Change under each actionable row."""
     usable = PAGE_SIZE[0] - 2 * MARGIN
-    table_data = [
-        [
-            Paragraph("<b>Issue</b>", st["cell"]),
-            Paragraph("<b>New</b>", st["cell_center"]),
-            Paragraph("<b>Fixed</b>", st["cell_center"]),
-        ]
-    ]
-    for label, new_count, fixed_count in rows:
+    table_data: list = []
+    for row in rows:
+        label = row[0]
+        new_count = row[1] if len(row) > 1 else "0"
+        fix = row[3] if len(row) > 3 else ""
         try:
             new_n = int(str(new_count).strip() or "0")
         except ValueError:
             new_n = 0
-        label_style = issue_style if new_n > 0 else "cell"
-        table_data.append(
-            [
-                Paragraph(para(label), st[label_style]),
-                count_paragraph(new_count, severity if new_n > 0 else None, st),
-                count_paragraph(fixed_count, None, st),
-            ]
-        )
+
+        sev_hex = {
+            "error": "#DC2626",
+            "warning": "#EA580C",
+            "notice": "#CA8A04",
+        }.get(severity.lower(), "#222222")
+        if new_n > 0:
+            fix_html = _format_developer_fix_html(str(fix))
+            left_html = f'<font color="{sev_hex}"><b>{para(label)}</b></font>'
+            if fix_html:
+                left_html += f'<br/><font color="#767676">{fix_html}</font>'
+            left = Paragraph(left_html, st["issue_name"])
+        else:
+            left = Paragraph(para(label), st["issue_name_ok"])
+        right = Paragraph(para(str(new_count)), st["issue_count"])
+        table_data.append([left, right])
+
+    if not table_data:
+        return Table([[Paragraph("—", st["cell"])]], colWidths=[usable])
+
     table = Table(
         table_data,
-        colWidths=[usable * 0.78, usable * 0.11, usable * 0.11],
+        colWidths=[usable * 0.86, usable * 0.14],
         hAlign="LEFT",
     )
-    table.setStyle(
-        TableStyle(
-            [
-                ("LINEBELOW", (0, 0), (-1, 0), 0.5, HEURISTICS_LINE),
-                ("LINEBELOW", (0, 1), (-1, -1), 0.25, HEURISTICS_LINE),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-            ]
-        )
-    )
+    commands = [
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.4, TABLE_RULE),
+    ]
+    table.setStyle(TableStyle(commands))
     return table
 
 
@@ -705,7 +893,7 @@ class BarCell(Flowable):
         canvas.rect(0, 0, self.width, self.height, fill=1, stroke=0)
         bar_w = self.width * (self.value / self.max_value)
         if bar_w > 0:
-            canvas.setFillColor(HEURISTICS_ORANGE)
+            canvas.setFillColor(KPI_BLUE)
             canvas.rect(0, 0, bar_w, self.height, fill=1, stroke=0)
 
 
@@ -720,9 +908,9 @@ def distribution_table(
     col_widths = [usable * 0.28, usable * 0.44, usable * 0.14]
     table_data: list[list] = [
         [
-            Paragraph(f"<b>{para('Number of internal links')}</b>", st["cell"]),
-            Paragraph(f"<b>{para('Number of pages')}</b>", st["cell"]),
-            Paragraph(f"<b>{para('% of total pages')}</b>", st["cell_center"]),
+            Paragraph(para("Number of internal links"), st["cell_header"]),
+            Paragraph(para("Number of pages"), st["cell_header"]),
+            Paragraph(para("% of total pages"), st["cell_header_center"]),
         ]
     ]
     for label, pages, pct in rows:
@@ -743,7 +931,69 @@ def distribution_table(
             ]
         )
     table = Table(table_data, colWidths=col_widths, repeatRows=1, hAlign="LEFT")
-    table.setStyle(_baseline_table_style())
+    table.setStyle(_professional_table_style(len(table_data)))
+    return table
+
+
+_SEVERITY_HEX = {
+    "not meeting": "#DC2626",
+    "error": "#DC2626",
+    "errors": "#DC2626",
+    "partial": "#EA580C",
+    "warning": "#EA580C",
+    "warnings": "#EA580C",
+    "notice": "#CA8A04",
+    "notices": "#CA8A04",
+}
+
+
+def _colorize_key_metric(line: str) -> str:
+    """Bold + color-code 'N errors / N warnings / N notices' counts in a metric line."""
+    html = escape(line or "")
+    for pattern, hex_color in (
+        (r"(\d[\d,\.]*\s*errors?)", "#DC2626"),
+        (r"(\d[\d,\.]*\s*warnings?)", "#EA580C"),
+        (r"(\d[\d,\.]*\s*notices?)", "#CA8A04"),
+    ):
+        html = re.sub(pattern, rf'<font color="{hex_color}">\1</font>', html, flags=re.IGNORECASE)
+    return html
+
+
+def key_metric_block(score_lines: list[str], st: dict) -> list:
+    """Key metric as a bold, larger, color-coded line with a muted label."""
+    flow: list = [Paragraph("Key metric", st["key_metric_label"])]
+    for line in score_lines:
+        flow.append(Paragraph(_colorize_key_metric(line), st["key_metric"]))
+    return flow
+
+
+def priority_issues_table(action_items: list[tuple[str, str, str]], st: dict) -> Table:
+    """Tabular priority issues: Issue | Severity | Developer fix (where & what)."""
+    usable = PAGE_SIZE[0] - 2 * MARGIN
+    table_data: list = [
+        [
+            Paragraph("Issue", st["cell_header"]),
+            Paragraph("Severity", st["cell_header_center"]),
+            Paragraph("Developer fix (where &amp; what)", st["cell_header"]),
+        ]
+    ]
+    for issue, severity, fix in action_items:
+        sev_hex = _SEVERITY_HEX.get(severity.lower(), "#222222")
+        fix_html = _format_developer_fix_html(fix) or "—"
+        table_data.append(
+            [
+                Paragraph(f'<font color="{sev_hex}"><b>{para(issue)}</b></font>', st["cell"]),
+                Paragraph(f'<font color="{sev_hex}">{para(severity)}</font>', st["cell_center"]),
+                Paragraph(fix_html, st["cell"]),
+            ]
+        )
+    table = Table(
+        table_data,
+        colWidths=[usable * 0.24, usable * 0.13, usable * 0.63],
+        repeatRows=1,
+        hAlign="LEFT",
+    )
+    table.setStyle(_professional_table_style(len(table_data)))
     return table
 
 
@@ -758,26 +1008,27 @@ def executive_summary(
     action_items: list[tuple[str, str, str]],
     badge_diameter: float = LARGE_BADGE_DIAMETER,
 ) -> list:
-    """Client-facing summary: scores, narrative, and priority fixes."""
+    """Client-facing summary: large scores, narrative, and priority fixes with Where/Change."""
+    del badge_diameter  # unused; large % display replaces circular badges
     flow: list = [
         Paragraph("Executive Summary", st["summary_title"]),
         Paragraph(para(f"{report_label} · {domain}"), st["muted"]),
     ]
     if score_badges:
         flow.append(Spacer(1, 0.08 * inch))
-        flow.extend(score_badges_block(score_badges, st, diameter=badge_diameter))
+        flow.extend(score_display_block(score_badges, st))
     if score_lines:
-        flow.append(Spacer(1, 0.04 * inch))
-        flow.append(Paragraph(" · ".join(score_lines), st["summary_scores"]))
-    if action_items:
-        flow.append(Spacer(1, 0.08 * inch))
-        flow.append(Paragraph("Overview — issues &amp; resolutions", st["subsection"]))
-        flow.extend(issue_resolution_bullets(action_items, st))
-    elif narrative:
+        flow.append(Spacer(1, 0.06 * inch))
+        flow.extend(key_metric_block(score_lines, st))
+    if narrative:
         flow.append(Spacer(1, 0.08 * inch))
         flow.append(Paragraph("Overview", st["subsection"]))
         flow.append(Paragraph(para(narrative), st["body"]))
-    elif not narrative:
+    if action_items:
+        flow.append(Spacer(1, 0.12 * inch))
+        flow.append(Paragraph("Priority issues &amp; developer fixes", st["subsection"]))
+        flow.append(priority_issues_table(action_items, st))
+    elif not narrative and not action_items:
         flow.append(
             Paragraph(
                 para("No critical issues were identified. Continue monitoring the metrics in this report."),
@@ -815,79 +1066,97 @@ def manual_appendix(
 
 
 def _baseline_table_style() -> TableStyle:
-    return TableStyle(
-        [
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F4F6F8")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), BASELINE_TITLE),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, 0), 8),
-            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D9DEE7")),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 5),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-            ("TOPPADDING", (0, 0), (-1, -1), 4),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ]
-    )
+    """Backward-compatible alias for the professional table style."""
+    return _professional_table_style(2)
 
 
-def _draw_content_header(canvas, *, right_top: str, right_sub: str = "") -> None:
-    """Brand header with rule drawn below text (not through it)."""
+def _professional_table_style(row_count: int) -> TableStyle:
+    """Soft Semrush-like table: light header, hairline rules, airy rows."""
+    commands = [
+        ("BACKGROUND", (0, 0), (-1, 0), TABLE_HEADER_BG),
+        ("TEXTCOLOR", (0, 0), (-1, 0), TABLE_HEADER_FG),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 8),
+        ("FONTSIZE", (0, 1), (-1, -1), 8),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.6, TABLE_RULE),
+        ("LINEBELOW", (0, 1), (-1, -2), 0.35, TABLE_RULE),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]
+    for row in range(1, max(row_count, 1)):
+        if row % 2 == 0:
+            commands.append(("BACKGROUND", (0, row), (-1, row), TABLE_ZEBRA))
+    return TableStyle(commands)
+
+
+def draw_semrush_header(canvas) -> None:
+    """Logo left + web URL right + hairline (Semrush content header)."""
     canvas.saveState()
     width, height = PAGE_SIZE
-    y_top = height - HEADER_TEXT_TOP
-    y_sub = height - HEADER_TEXT_SECOND
-    y_rule = height - HEADER_RULE_Y
-
+    logo_size = 10 * mm
+    _draw_logo_on_canvas(canvas, x=MARGIN, y=height - 16 * mm, size=logo_size)
     canvas.setFont("Helvetica", 7)
     canvas.setFillColor(HEURISTICS_MUTED)
-    canvas.drawString(MARGIN, y_top, HEURISTICS_BRAND)
-    canvas.drawString(MARGIN, y_sub, HEURISTICS_WEB)
-    canvas.drawRightString(width - MARGIN, y_top, right_top)
-    if right_sub:
-        canvas.drawRightString(width - MARGIN, y_sub, right_sub)
+    canvas.drawRightString(width - MARGIN, height - 12 * mm, HEURISTICS_WEB)
+    canvas.setStrokeColor(HEURISTICS_LINE)
+    canvas.setLineWidth(0.5)
+    canvas.line(MARGIN, height - HEADER_RULE_Y, width - MARGIN, height - HEADER_RULE_Y)
+    canvas.restoreState()
 
+
+def draw_semrush_footer(canvas, doc, *, generated: str = "") -> None:
+    """Hairline footer: generated | attribution | page number."""
+    canvas.saveState()
+    width, _ = PAGE_SIZE
+    y_rule = 12 * mm
+    y_text = 7 * mm
     canvas.setStrokeColor(HEURISTICS_LINE)
     canvas.setLineWidth(0.5)
     canvas.line(MARGIN, y_rule, width - MARGIN, y_rule)
+    canvas.setFont("Helvetica", 7)
+    canvas.setFillColor(HEURISTICS_MUTED)
+    if generated:
+        canvas.drawString(MARGIN, y_text, generated)
+    canvas.drawCentredString(width / 2, y_text, FOOTER_ATTRIBUTION)
+    canvas.drawRightString(width - MARGIN, y_text, str(doc.page))
     canvas.restoreState()
 
 
 def draw_audit_page_decor(canvas, doc, *, domain: str, generated: str) -> None:
-    """Heuristics AI header and footer on site audit content pages."""
-    canvas.saveState()
-    width, _ = PAGE_SIZE
-    _draw_content_header(
-        canvas,
-        right_top=f"Heuristics AI Site Audit  {doc.page}",
-        right_sub=generated,
-    )
-
-    canvas.setStrokeColor(HEURISTICS_LINE)
-    canvas.setLineWidth(0.5)
-    canvas.line(MARGIN, 12 * mm, width - MARGIN, 12 * mm)
-    canvas.setFont("Helvetica", 7)
-    canvas.setFillColor(HEURISTICS_MUTED)
-    canvas.drawString(MARGIN, 7 * mm, domain)
-    canvas.restoreState()
+    """HeuristicsAI Semrush-like header and footer on site audit content pages."""
+    del domain  # domain kept for call-site compatibility; footer uses brand attribution
+    draw_semrush_header(canvas)
+    draw_semrush_footer(canvas, doc, generated=generated)
 
 
-def chart_image(png_bytes: bytes, *, height_ratio: float = 0.24) -> Image:
-    """Embed a matplotlib PNG in the baseline PDF."""
+def chart_image(
+    png_bytes: bytes,
+    *,
+    width: float | None = None,
+    height_ratio: float | None = None,
+) -> Image:
+    """Embed a matplotlib PNG, preserving its native aspect ratio.
+
+    `height_ratio` is ignored for sizing (kept for call-site compatibility).
+    Pass `width` to fit a column; defaults to the full content width.
+    """
     usable = PAGE_SIZE[0] - 2 * MARGIN
-    return Image(
-        BytesIO(png_bytes),
-        width=usable,
-        height=usable * height_ratio,
-    )
+    target_w = width if width is not None else usable
+    img = Image(BytesIO(png_bytes))
+    native_w = float(getattr(img, "imageWidth", 0) or 0)
+    native_h = float(getattr(img, "imageHeight", 0) or 0)
+    aspect = (native_h / native_w) if native_w > 0 else (height_ratio or 0.42)
+    img.drawWidth = target_w
+    img.drawHeight = target_w * aspect
+    return img
 
 
 def draw_baseline_page_number(canvas, doc) -> None:
     canvas.saveState()
-    width, _ = PAGE_SIZE
     if doc.page > 1:
-        _draw_content_header(canvas, right_top=f"Performance Baseline  {doc.page}")
-        canvas.setFont("Helvetica", 8)
-        canvas.setFillColor(HEURISTICS_MUTED)
-        canvas.drawRightString(width - MARGIN, 10 * mm, str(doc.page))
+        draw_semrush_header(canvas)
+        draw_semrush_footer(canvas, doc, generated=audit_generated_label())
     canvas.restoreState()

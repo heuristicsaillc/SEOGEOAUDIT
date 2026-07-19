@@ -89,6 +89,7 @@ class ParameterResult(BaseModel):
 
     detail: str = ""  # Evidence/explanation of why this rating was assigned
     recommendation: str = ""  # Concrete fix (empty when Meeting)
+    fix_where: str = ""  # Where developers should make the change (URL/file/CMS/config)
     priority: Priority | None = None  # Priority of the fix (None when Meeting/Manual)
     effort: str = ""  # Rough effort estimate for the fix (e.g. "Low", "1-2h")
 

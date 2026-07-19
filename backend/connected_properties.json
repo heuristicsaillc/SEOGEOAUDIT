@@ -1,8 +1,8 @@
 {
   "_comment": "Map a connected domain to its GSC property URL and GA4 numeric Property ID. Use the bare domain key (no www); audits of https://www.example.com and https://example.com both resolve here. When listed AND Google credentials have access, the 6 first-party SEO parameters are Measured.",
-  "_example.com": {
-    "gsc_site_url": "https://example.com/",
-    "ga4_property_id": "123456789"
+  "optiorx.com": {
+    "gsc_site_url": "https://optiorx.com/",
+    "ga4_property_id": "430736092"
   },
   "heuristicsaisolutions.com": {
     "gsc_site_url": "sc-domain:heuristicsaisolutions.com",

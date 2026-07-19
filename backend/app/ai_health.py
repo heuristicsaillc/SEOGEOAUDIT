@@ -80,7 +80,7 @@ def compute_ai_search_health(seo: Report, geo: Report) -> tuple[float, dict[str,
         "citation": citation,
         "baseline": baseline,
     }
-    return round(score, 1), breakdown
+    return round(score, 2), breakdown
 
 
 def attach_ai_search_health(seo: Report, geo: Report) -> float:
@@ -102,9 +102,9 @@ def attach_ai_search_health(seo: Report, geo: Report) -> float:
         rating=rating,
         method=DetectionMethod.CRAWL,
         detail=(
-            f"score={score:.1f}%; access={breakdown['access']:.1f}%; "
-            f"structured={breakdown['structured']:.1f}%; extractability={breakdown['extractability']:.1f}%; "
-            f"citation={breakdown['citation']:.1f}%; baseline={breakdown['baseline']:.1f}%"
+            f"score={score:.2f}%; access={breakdown['access']:.2f}%; "
+            f"structured={breakdown['structured']:.2f}%; extractability={breakdown['extractability']:.2f}%; "
+            f"citation={breakdown['citation']:.2f}%; baseline={breakdown['baseline']:.2f}%"
         ),
         weight=0.0,
         evidence=breakdown,
@@ -141,7 +141,7 @@ def _weighted_param_score(index: dict[str, ParameterResult], spec: dict[str, flo
             continue
         earned += weight * RATING_CREDIT[param.rating]
         possible += weight
-    return round((earned / possible) * 100, 1) if possible > 0 else 0.0
+    return round((earned / possible) * 100, 2) if possible > 0 else 0.0
 
 
 def _category_score(report: Report, keys: tuple[str, ...], *, param_weight: float = 1.0) -> float:
@@ -158,7 +158,7 @@ def _category_score(report: Report, keys: tuple[str, ...], *, param_weight: floa
                 continue
             earned += w * param.weight * RATING_CREDIT[param.rating]
             possible += w * param.weight
-    return round((earned / possible) * 100, 1) if possible > 0 else 0.0
+    return round((earned / possible) * 100, 2) if possible > 0 else 0.0
 
 
 def _citation_pillar_score(geo: Report) -> float:
@@ -175,7 +175,7 @@ def _citation_pillar_score(geo: Report) -> float:
             w = w_mult * param.weight
             earned += w * RATING_CREDIT[param.rating]
             possible += w
-    return round((earned / possible) * 100, 1) if possible > 0 else 0.0
+    return round((earned / possible) * 100, 2) if possible > 0 else 0.0
 
 
 def _all_major_ai_bots_blocked(index: dict[str, ParameterResult]) -> bool:

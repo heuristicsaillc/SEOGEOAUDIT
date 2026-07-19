@@ -57,11 +57,23 @@ export default function CategoryTable({ category }) {
                 {p.priority && <span className="priority">{p.priority}</span>}
               </td>
               <td>
-                {p.recommendation ? (
+                {p.fix_where || p.recommendation ? (
                   <>
-                    {p.recommendation}
+                    {p.fix_where && (
+                      <div className="param-fix-where">
+                        <strong>Where:</strong> {p.fix_where}
+                      </div>
+                    )}
+                    {p.recommendation && (
+                      <div className="param-fix-change">
+                        {p.fix_where ? <strong>Change: </strong> : null}
+                        {p.recommendation}
+                      </div>
+                    )}
                     {p.detail && p.detail !== p.recommendation && (
-                      <div className="muted param-detail">{p.detail}</div>
+                      <div className="muted param-detail">
+                        <strong>Evidence:</strong> {p.detail}
+                      </div>
                     )}
                   </>
                 ) : (

@@ -77,6 +77,7 @@ def scored(
     partial: bool = False,
     detail: str = "",
     recommendation: str = "",
+    fix_where: str = "",
     priority: Priority = Priority.MEDIUM,
     effort: str = "Low",
     weight: float = 1.0,
@@ -106,6 +107,7 @@ def scored(
         detail=detail,  # Evidence string
         # Only attach a fix when there is room to improve
         recommendation=recommendation if rating != Rating.MEETING else "",
+        fix_where=fix_where if rating != Rating.MEETING else "",
         priority=priority if rating != Rating.MEETING else None,  # Priority only when actionable
         effort=effort if rating != Rating.MEETING else "",  # Effort only when actionable
         evidence=evidence or {},  # Structured evidence for the UI

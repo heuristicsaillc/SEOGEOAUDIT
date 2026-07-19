@@ -36,7 +36,7 @@ def score_category(category: CategoryResult) -> CategoryResult:
             manual_count += 1  # Tally an excluded parameter
 
     # Category score is 0-100; a category with no scored parameters scores 0 but is weightless later
-    category.score = round((earned / possible) * 100, 1) if possible > 0 else 0.0
+    category.score = round((earned / possible) * 100, 2) if possible > 0 else 0.0
     category.scored_count = scored_count  # Expose the scored count to the UI
     category.manual_count = manual_count  # Expose the excluded count to the UI
     return category  # Return the same (mutated) object for convenience
@@ -55,7 +55,7 @@ def score_report(report: Report) -> Report:
             total_weighted += category.weight * category.score  # Weighted contribution
             total_weight += category.weight  # Accumulate weight
 
-    report.score = round(total_weighted / total_weight, 1) if total_weight > 0 else 0.0  # Final 0-100
+    report.score = round(total_weighted / total_weight, 2) if total_weight > 0 else 0.0  # Final 0-100
     report.grade = grade_for_score(report.score)  # Map to a letter grade
     report.manual_count = manual_total  # Total excluded parameters
     return report  # Return the mutated report

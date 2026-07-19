@@ -1023,18 +1023,23 @@ class FirecrawlClient:
 
     async def rendered_html(self, url: str) -> str:
         """Return rendered HTML for `url` ("" on failure)."""
+        return await self.fetch_body(url)
+
+    async def fetch_body(self, url: str) -> str:
+        """Return page/body text for `url`, preferring rawHtml over html ("" on failure)."""
         if not self._enabled:  # No key configured
             return ""  # No fallback available
         try:  # Network call may fail
             response = await self._client.post(  # Firecrawl scrape request
                 _FIRECRAWL_SCRAPE,
                 headers={"Authorization": f"Bearer {self._key}"},  # Bearer auth
-                json={"url": url, "formats": ["html"]},  # Ask for rendered HTML
+                json={"url": url, "formats": ["rawHtml", "html"]},  # Prefer unmodified body
                 timeout=45.0,  # Rendering can be slow; allow extra time
             )
             if response.status_code != 200:  # Non-200 => unavailable
                 return ""  # Degrade gracefully
-            return response.json().get("data", {}).get("html", "")  # Extract rendered HTML
+            data = response.json().get("data", {})  # Scrape payload
+            return data.get("rawHtml") or data.get("html") or ""  # Prefer raw body
         except Exception:  # Any error
             return ""  # Degrade gracefully
 

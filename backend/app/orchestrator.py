@@ -39,6 +39,7 @@ from app.agents.site_audit_supplement_agent import SiteAuditSupplementAgent
 from app.clients import Clients, build_async_client  # External clients + HTTP factory
 from app.config import Settings, get_settings  # Application configuration
 from app.crawl import Fetcher, normalise_url, registrable_host  # Page fetching + host key
+from app.developer_fixes import enrich_report  # Where/what developer guidance
 from app.models import AuditResponse, CategoryResult, ParameterResult, Report  # Models
 from app.ai_health import attach_ai_search_health
 from app.audit_history import save_audit_snapshot
@@ -170,6 +171,9 @@ class AuditOrchestrator:
 
             # Build the two reports from the agent outcomes
             seo_report, geo_report, panels = self._assemble_reports(agents, outcomes)
+            page_url = page.final_url or normalised
+            enrich_report(seo_report, page_url=page_url)
+            enrich_report(geo_report, page_url=page_url)
 
             await emit("Calculating SEO and GEO scores…")
             score_report(seo_report)  # SEO scoring

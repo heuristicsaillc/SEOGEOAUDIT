@@ -3,7 +3,8 @@
 This module owns all page I/O and all DOM-to-data extraction:
   1. PageContext  - the data object every agent reads from
   2. parser       - pure BeautifulSoup -> structured fields (no I/O)
-  3. Fetcher      - httpx fetch + Playwright/Firecrawl render + robots/sitemap/llms + crawl
+  3. Fetcher      - httpx fetch with Cloudflare bypass (Playwright session,
+                    then Firecrawl for critical bodies) + robots/sitemap/llms + crawl
 
 Agents are pure consumers of the resulting PageContext plus their own API calls,
 which keeps each agent small and independently testable.
@@ -53,6 +54,8 @@ class SitemapInfo:
     locs: list[str] = field(default_factory=list)  # Sampled <loc> URLs from the sitemap
     http_loc_count: int = 0  # HTTP locs when the site is served over HTTPS
     loc_status: dict[str, int] = field(default_factory=dict)  # loc url -> HTTP status
+    blocked: bool = False  # True when bot protection blocked sitemap fetch
+    block_detail: str = ""  # Evidence when blocked (e.g. status=403)
 
 
 @dataclass
@@ -511,6 +514,127 @@ def normalise_url(url: str) -> str:
     return url  # Normalised URL
 
 
+# Realistic browser UA for Cloudflare bypass (auditor UA is often challenged).
+_BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+_CF_BODY_MARKERS = (
+    "attention required",
+    "just a moment",
+    "cf-browser-verification",
+    "challenge-platform",
+    "cdn-cgi/challenge",
+    "cloudflare ray id",
+    "checking your browser",
+    "enable javascript and cookies to continue",
+    "cf-chl",
+    "cf-error-details",
+    "error code 1020",
+    "error code 1015",
+    "access denied",
+    "sorry, you have been blocked",
+    "blocked by security policy",
+)
+
+# Soft-block statuses often returned by Cloudflare/WAF instead of a real page error.
+# (503 is only treated as a bot block when CF challenge headers/body are present.)
+_BOT_SOFT_BLOCK_STATUSES = frozenset({401, 403, 429})
+
+# Sentinel status: URL could not be verified because of bot protection (not a site 4xx/5xx).
+STATUS_BOT_BLOCKED = -403
+
+
+def is_http_error_status(status: int) -> bool:
+    """True for real HTTP client/server errors (excludes bot-block sentinel)."""
+    return status >= 400
+
+
+def is_bot_blocked_status(status: int) -> bool:
+    """True when status is the bot-protection sentinel."""
+    return status == STATUS_BOT_BLOCKED
+
+
+def is_reportable_http_error(status: int) -> bool:
+    """True for real broken-page statuses (excludes bot sentinel and WAF soft-blocks)."""
+    return is_http_error_status(status) and status not in _BOT_SOFT_BLOCK_STATUSES
+
+
+@dataclass
+class FetchResult:
+    """Normalised response from httpx, Playwright, or Firecrawl."""
+
+    status_code: int = 0
+    text: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
+    final_url: str = ""
+    http_version: str = ""
+    content: bytes = b""
+    history: list[tuple[str, int]] = field(default_factory=list)
+    blocked: bool = False
+    via: str = "httpx"
+
+
+def _is_challenge_body(text: str) -> bool:
+    """Return True when body looks like a Cloudflare/bot interstitial."""
+    if not text:
+        return False
+    lower = text[:8000].lower()
+    return any(marker in lower for marker in _CF_BODY_MARKERS)
+
+
+def _has_cloudflare_headers(headers: dict[str, str] | None) -> bool:
+    headers = headers or {}
+    server = headers.get("server", "").lower()
+    return (
+        "cf-ray" in headers
+        or "cf-cache-status" in headers
+        or "cloudflare" in server
+        or server == "cloudflare"
+    )
+
+
+def _is_challenge_response(status_code: int, text: str, headers: dict[str, str] | None = None) -> bool:
+    """Return True when status/body/headers indicate bot protection."""
+    headers = headers or {}
+    if _is_challenge_body(text):
+        return True
+    if status_code in (*_BOT_SOFT_BLOCK_STATUSES, 503) and _has_cloudflare_headers(headers):
+        return True
+    # Empty/short deny bodies are typical of edge blocks without an HTML challenge page.
+    if status_code in _BOT_SOFT_BLOCK_STATUSES and len((text or "").strip()) < 64:
+        return True
+    return False
+
+
+def _origin_probe_status(
+    status_code: int,
+    text: str = "",
+    headers: dict[str, str] | None = None,
+    *,
+    blocked: bool = False,
+) -> int:
+    """Normalize an audited-origin probe status for reporting.
+
+    Bot challenges and soft-block denials (401/403/429) become STATUS_BOT_BLOCKED
+    so public-site audits do not treat Cloudflare/WAF blocks as real broken pages.
+    Real 404/410 and non-CF 5xx still pass through.
+    """
+    if blocked or _is_challenge_response(status_code, text, headers):
+        return STATUS_BOT_BLOCKED
+    if status_code in _BOT_SOFT_BLOCK_STATUSES:
+        return STATUS_BOT_BLOCKED
+    return status_code or 0
+
+
+def _looks_like_sitemap(text: str) -> bool:
+    """Return True when text appears to be sitemap XML."""
+    sample = text.lstrip()[:2000].lower()
+    return "<urlset" in sample or "<sitemapindex" in sample
+
+
 class Fetcher:
     """Builds a PageContext for a single target URL."""
 
@@ -519,117 +643,386 @@ class Fetcher:
         self._http = http  # Shared async HTTP client
         self._settings = settings  # Crawl tunables
         self._firecrawl = firecrawl  # Firecrawl render fallback
+        self._audited_host = ""  # Registrable host for the audit target
+        self._pw = None  # Playwright driver (lazy)
+        self._browser = None  # Chromium browser (lazy)
+        self._context = None  # Browser context with clearance cookies
+        self._pw_lock = asyncio.Lock()  # Serialize session creation / navigations
+        self._pw_ready = False  # True after session bootstrap finished
+        self._pw_cleared = False  # True when CF challenge was cleared once
+        self._pw_skip = False  # True when Playwright cannot beat bot protection
 
     async def fetch(self, url: str) -> PageContext:
         """Fetch everything and return a populated PageContext."""
-        ctx = PageContext(url=normalise_url(url))  # Seed the context with the normalised URL
-        await self._fetch_main(ctx)  # Fetch the primary document (fills raw HTML + network info)
+        normalised = normalise_url(url)
+        ctx = PageContext(url=normalised)
+        self._audited_host = registrable_host(urlparse(normalised).netloc)
+        try:
+            await self._fetch_main(ctx)
+            # robots before sitemap so Sitemap: directive is available
+            await self._fetch_robots(ctx)
+            await asyncio.gather(
+                self._render(ctx),
+                self._fetch_llms(ctx),
+                self._fetch_sitemap(ctx),
+                return_exceptions=True,
+            )
+            ctx.html = ctx.rendered_html or ctx.raw_html
+            if _is_challenge_body(ctx.html):
+                ctx.errors.append("page HTML still looks like a bot-protection challenge")
+            parse_into_context(ctx)
+            await self._internal_crawl(ctx)
+            await self._supplementary_probes(ctx)
+            return ctx
+        finally:
+            await self._close_playwright()
 
-        # Launch all independent discovery tasks concurrently for speed
-        await asyncio.gather(
-            self._render(ctx),  # Render JS (Playwright or Firecrawl) -> rendered_html
-            self._fetch_robots(ctx),  # /robots.txt
-            self._fetch_llms(ctx),  # /llms.txt and /llms-full.txt existence
-            self._fetch_sitemap(ctx),  # sitemap discovery + validation
-            return_exceptions=True,  # A failure in one task must not cancel the others
+    def _is_audited_url(self, url: str) -> bool:
+        """True when URL belongs to the audited registrable host (or host unset)."""
+        if not self._audited_host:
+            return True
+        host = registrable_host(urlparse(url).netloc)
+        return not host or host == self._audited_host
+
+    async def _get(
+        self,
+        url: str,
+        *,
+        allow_firecrawl: bool = True,
+        headers: dict[str, str] | None = None,
+    ) -> FetchResult:
+        """GET url via httpx, escalating to Playwright then Firecrawl on CF blocks."""
+        result = await self._httpx_get(url, headers=headers)
+        audited = self._is_audited_url(url)
+        # Soft-block statuses on the audited origin always escalate — CF often
+        # returns bare 403s that look like "real" errors without challenge HTML.
+        soft_block = audited and (
+            result.blocked or result.status_code in _BOT_SOFT_BLOCK_STATUSES or not result.status_code
+        )
+        if result.status_code and not result.blocked and not soft_block:
+            return result
+
+        if not audited:
+            return result
+
+        if self._settings.enable_playwright and not self._pw_skip:
+            pw = await self._playwright_get(url, allow_navigate=True)
+            if pw.status_code and not pw.blocked and pw.status_code not in _BOT_SOFT_BLOCK_STATUSES:
+                return pw
+            if pw.text and not pw.blocked and not _is_challenge_body(pw.text):
+                return pw
+            if pw.status_code or pw.text:
+                result = pw
+
+        if allow_firecrawl and self._firecrawl.enabled:
+            fc = await self._firecrawl_get(url)
+            if fc.text and not fc.blocked:
+                return fc
+
+        result.blocked = True
+        return result
+
+    async def _httpx_get(self, url: str, headers: dict[str, str] | None = None) -> FetchResult:
+        """Plain httpx GET; marks blocked when Cloudflare challenges the client."""
+        try:
+            response = await self._http.get(url, headers=headers or {})
+            text = response.text
+            hdrs = {k.lower(): v for k, v in response.headers.items()}
+            blocked = _is_challenge_response(response.status_code, text, hdrs)
+            history = [(str(hop.url), hop.status_code) for hop in response.history]
+            history.append((str(response.url), response.status_code))
+            return FetchResult(
+                status_code=response.status_code,
+                text="" if blocked else text,
+                headers=hdrs,
+                final_url=str(response.url),
+                http_version=response.http_version,
+                content=b"" if blocked else response.content,
+                history=history,
+                blocked=blocked,
+                via="httpx",
+            )
+        except Exception:
+            # Treat transport failure as escalate-worthy for audited hosts.
+            return FetchResult(status_code=0, blocked=True, via="httpx")
+
+    async def _firecrawl_get(self, url: str) -> FetchResult:
+        """Fetch body via Firecrawl scrape (rawHtml preferred)."""
+        text = await self._firecrawl.fetch_body(url)
+        if not text or _is_challenge_body(text):
+            return FetchResult(blocked=True, via="firecrawl")
+        return FetchResult(
+            status_code=200,
+            text=text,
+            final_url=url,
+            content=text.encode("utf-8", errors="ignore"),
+            via="firecrawl",
         )
 
-        # Choose the best HTML (rendered if we got it, else raw) and parse it
-        ctx.html = ctx.rendered_html or ctx.raw_html  # Prefer rendered DOM
-        parse_into_context(ctx)  # Populate text/structure fields
+    async def _ensure_playwright_session(self, seed_url: str) -> bool:
+        """Launch a shared Chromium context and attempt to clear CF challenge once."""
+        if self._pw_skip:
+            return False
+        if self._pw_ready and self._context is not None:
+            return True
+        if not self._settings.enable_playwright:
+            return False
+        async with self._pw_lock:
+            if self._pw_skip:
+                return False
+            if self._pw_ready and self._context is not None:
+                return True
+            try:
+                from playwright.async_api import async_playwright
 
-        await self._internal_crawl(ctx)  # Shallow internal crawl (needs parsed links)
-        await self._supplementary_probes(ctx)  # Asset/TLS/WWW/sitemap validation
-        return ctx  # The fully-populated context
+                self._pw = await async_playwright().start()
+                self._browser = await self._pw.chromium.launch(headless=True)
+                self._context = await self._browser.new_context(
+                    user_agent=_BROWSER_UA,
+                    viewport={"width": 1280, "height": 720},
+                    ignore_https_errors=True,
+                )
+                page = await self._context.new_page()
+                try:
+                    await page.goto(seed_url, wait_until="domcontentloaded", timeout=20000)
+                    cleared = False
+                    for _ in range(8):
+                        content = await page.content()
+                        if not _is_challenge_body(content):
+                            cleared = True
+                            break
+                        await page.wait_for_timeout(750)
+                    self._pw_cleared = cleared
+                    if not cleared:
+                        # Headless Chromium could not pass the challenge; prefer Firecrawl.
+                        self._pw_skip = True
+                finally:
+                    await page.close()
+                if self._pw_skip:
+                    await self._close_playwright()
+                    return False
+                self._pw_ready = self._context is not None
+                return self._pw_ready
+            except Exception:
+                self._pw_skip = True
+                await self._close_playwright()
+                return False
+
+    async def _close_playwright(self) -> None:
+        """Release Playwright resources for this audit."""
+        context, browser, pw = self._context, self._browser, self._pw
+        self._context = self._browser = self._pw = None
+        self._pw_ready = False
+        for obj, method in ((context, "close"), (browser, "close"), (pw, "stop")):
+            if obj is None:
+                continue
+            try:
+                await getattr(obj, method)()
+            except Exception:
+                pass
+
+    async def _playwright_request(self, url: str) -> FetchResult:
+        """Lightweight GET via Playwright request API (no page navigation)."""
+        if self._pw_skip or not await self._ensure_playwright_session(url):
+            return FetchResult(blocked=True, via="playwright")
+        assert self._context is not None
+        try:
+            resp = await self._context.request.get(url, timeout=15000)
+            text = await resp.text()
+            hdrs = {k.lower(): v for k, v in resp.headers.items()}
+            blocked = _is_challenge_response(resp.status, text, hdrs)
+            return FetchResult(
+                status_code=resp.status,
+                text="" if blocked else text,
+                headers=hdrs,
+                final_url=resp.url,
+                content=b"" if blocked else text.encode("utf-8", errors="ignore"),
+                blocked=blocked,
+                via="playwright",
+            )
+        except Exception:
+            return FetchResult(blocked=True, via="playwright")
+
+    async def _playwright_get(self, url: str, *, allow_navigate: bool = True) -> FetchResult:
+        """GET via shared Playwright context (request API, optional single navigation)."""
+        result = await self._playwright_request(url)
+        if not result.blocked and result.status_code:
+            return result
+        if not allow_navigate or self._pw_skip or self._context is None:
+            return result
+
+        async with self._pw_lock:
+            if self._pw_skip or self._context is None:
+                return FetchResult(blocked=True, via="playwright")
+            page = await self._context.new_page()
+            try:
+                resp = await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                status = resp.status if resp else 0
+                text = ""
+                if resp is not None:
+                    try:
+                        text = await resp.text()
+                    except Exception:
+                        text = await page.content()
+                else:
+                    text = await page.content()
+
+                for _ in range(6):
+                    if not _is_challenge_response(status or 403, text, {}):
+                        break
+                    await page.wait_for_timeout(750)
+                    text = await page.content()
+                    status = 200
+
+                if _is_challenge_response(status or 403, text, {}):
+                    self._pw_skip = True
+                    return FetchResult(
+                        status_code=status or 403,
+                        text="",
+                        final_url=page.url,
+                        blocked=True,
+                        via="playwright",
+                    )
+                self._pw_cleared = True
+                return FetchResult(
+                    status_code=status or 200,
+                    text=text,
+                    final_url=page.url,
+                    content=text.encode("utf-8", errors="ignore"),
+                    via="playwright",
+                )
+            except Exception:
+                return FetchResult(blocked=True, via="playwright")
+            finally:
+                await page.close()
 
     async def _fetch_main(self, ctx: PageContext) -> None:
         """GET the target URL, recording status, redirects, headers, protocol and TTFB."""
-        start = time.perf_counter()  # Start TTFB timer
-        try:  # The primary fetch can still fail (DNS, TLS, timeout)
-            response = await self._http.get(ctx.url)  # Issue the GET (redirects auto-followed)
-            ctx.ttfb_ms = (time.perf_counter() - start) * 1000.0  # Elapsed -> milliseconds
-            ctx.status_code = response.status_code  # Final status code
-            ctx.final_url = str(response.url)  # URL after redirects
-            ctx.http_version = response.http_version  # Negotiated protocol (e.g. HTTP/2)
-            ctx.raw_html = response.text  # Raw (pre-JS) HTML
-            ctx.html_byte_size = len(response.content)  # Payload size for HTML byte-size check
-            ctx.content_encoding = response.headers.get("content-encoding", "")  # gzip/br identity
-            ctx.headers = {k.lower(): v for k, v in response.headers.items()}  # Lower-cased headers
-            ctx.tls_ok = ctx.final_url.startswith("https://")  # HTTPS used end-to-end
-            # Reconstruct the redirect chain from httpx history
-            for hop in response.history:  # Each redirect response
-                ctx.redirect_chain.append((str(hop.url), hop.status_code))  # Record url + status
-            ctx.redirect_chain.append((ctx.final_url, ctx.status_code))  # Append the final hop
-        except Exception as exc:  # Capture but do not raise
-            ctx.errors.append(f"main fetch failed: {exc}")  # Record the error for the response
-            ctx.final_url = ctx.url  # Fall back to the requested URL
+        start = time.perf_counter()
+        try:
+            result = await self._get(ctx.url, allow_firecrawl=True)
+            ctx.ttfb_ms = (time.perf_counter() - start) * 1000.0
+            ctx.status_code = result.status_code or (403 if result.blocked else 0)
+            ctx.final_url = result.final_url or ctx.url
+            ctx.http_version = result.http_version or ctx.http_version
+            ctx.raw_html = result.text
+            ctx.html_byte_size = len(result.content) if result.content else len(result.text.encode("utf-8", errors="ignore"))
+            ctx.content_encoding = result.headers.get("content-encoding", "")
+            ctx.headers = result.headers
+            ctx.tls_ok = ctx.final_url.startswith("https://")
+            ctx.redirect_chain = list(result.history) or [(ctx.final_url, ctx.status_code)]
+            if result.blocked:
+                ctx.errors.append(f"main fetch blocked by bot protection (via={result.via})")
+            elif result.via != "httpx":
+                ctx.errors.append(f"main fetch used bypass via={result.via}")
+            # Keep audited host in sync after redirects
+            self._audited_host = registrable_host(urlparse(ctx.final_url).netloc) or self._audited_host
+        except Exception as exc:
+            ctx.errors.append(f"main fetch failed: {exc}")
+            ctx.final_url = ctx.url
             msg = str(exc).lower()
             if "getaddrinfo" in msg or "name or service not known" in msg or "nodename nor servname" in msg:
                 ctx.dns_ok = False
 
     async def _render(self, ctx: PageContext) -> None:
         """Render the page with Playwright; fall back to Firecrawl; else leave empty."""
-        if self._settings.enable_playwright:  # Playwright rendering is enabled
-            html = await self._render_playwright(ctx.final_url or ctx.url)  # Try the headless browser
-            if html:  # Rendering succeeded
-                ctx.rendered_html = html  # Store rendered DOM
-                return  # Done
-        if self._firecrawl.enabled:  # Otherwise try the hosted Firecrawl fallback
-            ctx.rendered_html = await self._firecrawl.rendered_html(ctx.final_url or ctx.url)  # Render
+        url = ctx.final_url or ctx.url
+        if self._settings.enable_playwright:
+            html = await self._render_via_session(url)
+            if not html:
+                html = await self._render_playwright(url)
+            if html and not _is_challenge_body(html):
+                ctx.rendered_html = html
+                return
+        if self._firecrawl.enabled:
+            html = await self._firecrawl.rendered_html(url)
+            if html and not _is_challenge_body(html):
+                ctx.rendered_html = html
+
+    async def _render_via_session(self, url: str) -> str:
+        """Render using the shared bypass browser context when available."""
+        if self._pw_skip or not await self._ensure_playwright_session(url):
+            return ""
+        assert self._context is not None
+        async with self._pw_lock:
+            if self._pw_skip or self._context is None:
+                return ""
+            page = await self._context.new_page()
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                html = await page.content()
+                if _is_challenge_body(html):
+                    self._pw_skip = True
+                    return ""
+                return html
+            except Exception:
+                return ""
+            finally:
+                await page.close()
 
     async def _render_playwright(self, url: str) -> str:
-        """Use a headless Chromium to obtain the post-JS HTML ("" on failure)."""
-        try:  # Playwright may not be installed / browser may be missing
-            from playwright.async_api import async_playwright  # Imported lazily to keep startup cheap
+        """Use a one-off headless Chromium to obtain post-JS HTML ("" on failure)."""
+        try:
+            from playwright.async_api import async_playwright
 
-            async with async_playwright() as pw:  # Manage the Playwright lifecycle
-                browser = await pw.chromium.launch(headless=True)  # Launch headless Chromium
-                try:  # Ensure the browser is always closed
-                    page = await browser.new_page(user_agent=self._settings.crawl_user_agent)  # New tab
-                    # Wait for network to settle so client-rendered content is present
-                    await page.goto(url, wait_until="networkidle", timeout=30000)  # Navigate
-                    return await page.content()  # Serialised rendered DOM
-                finally:  # Always release browser resources
-                    await browser.close()  # Close the browser
-        except Exception:  # Playwright missing/crash/timeout
-            return ""  # Signal "no rendered HTML"
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                try:
+                    page = await browser.new_page(user_agent=_BROWSER_UA)
+                    await page.goto(url, wait_until="networkidle", timeout=30000)
+                    html = await page.content()
+                    return "" if _is_challenge_body(html) else html
+                finally:
+                    await browser.close()
+        except Exception:
+            return ""
 
     async def _fetch_robots(self, ctx: PageContext) -> None:
         """Fetch /robots.txt and record its contents + existence."""
-        robots_url = urljoin(ctx.origin + "/", "robots.txt")  # Build the robots URL from the origin
-        try:  # Network call may fail
-            response = await self._http.get(robots_url)  # Fetch robots.txt
-            ctx.robots_exists = response.status_code == 200  # 200 => present
-            ctx.robots_txt = response.text if ctx.robots_exists else ""  # Store contents when present
-        except Exception:  # Any error
-            ctx.robots_exists = False  # Treat as missing
+        robots_url = urljoin(ctx.origin + "/", "robots.txt")
+        try:
+            result = await self._get(robots_url, allow_firecrawl=True)
+            if result.blocked or _is_challenge_body(result.text):
+                ctx.robots_exists = False
+                ctx.robots_txt = ""
+                ctx.errors.append(f"robots.txt blocked by bot protection (via={result.via})")
+                return
+            ctx.robots_exists = result.status_code == 200 and bool(result.text.strip())
+            ctx.robots_txt = result.text if ctx.robots_exists else ""
+        except Exception:
+            ctx.robots_exists = False
 
     async def _fetch_llms(self, ctx: PageContext) -> None:
         """Probe for /llms.txt and /llms-full.txt (existence only)."""
-        # Build absolute URLs for both LLM discovery files
-        llms_url = urljoin(ctx.origin + "/", "llms.txt")  # /llms.txt
-        llms_full_url = urljoin(ctx.origin + "/", "llms-full.txt")  # /llms-full.txt
-        # Check both concurrently; each call returns a status code (0 on failure)
+        llms_url = urljoin(ctx.origin + "/", "llms.txt")
+        llms_full_url = urljoin(ctx.origin + "/", "llms-full.txt")
         llms_status, llms_full_status = await asyncio.gather(
-            self._status(llms_url),  # Status of /llms.txt
-            self._status(llms_full_url),  # Status of /llms-full.txt
+            self._status(llms_url),
+            self._status(llms_full_url),
         )
-        ctx.llms_txt_exists = llms_status == 200  # Present when 200
-        ctx.llms_full_txt_exists = llms_full_status == 200  # Present when 200
+        ctx.llms_txt_exists = llms_status == 200
+        ctx.llms_full_txt_exists = llms_full_status == 200
 
     async def _fetch_sitemap(self, ctx: PageContext) -> None:
         """Locate and validate the sitemap (from robots.txt or the default path)."""
-        info = SitemapInfo()  # Start with an empty result
-        sitemap_url = self._sitemap_url_from_robots(ctx) or urljoin(ctx.origin + "/", "sitemap.xml")  # Pick URL
-        try:  # Network/XML parsing may fail
-            response = await self._http.get(sitemap_url)  # Fetch the sitemap
-            if response.status_code == 200 and response.text.strip():  # Present and non-empty
-                info.exists = True  # Mark as found
-                info.url = sitemap_url  # Record which URL was used
-                self._parse_sitemap_xml(response.text, info)  # Parse counts + index detection
-        except Exception:  # Any error
-            pass  # Leave info.exists = False
-        ctx.sitemap = info  # Attach the result to the context
+        info = SitemapInfo()
+        sitemap_url = self._sitemap_url_from_robots(ctx) or urljoin(ctx.origin + "/", "sitemap.xml")
+        info.url = sitemap_url
+        try:
+            result = await self._get(sitemap_url, allow_firecrawl=True)
+            if result.blocked or _is_challenge_body(result.text):
+                info.blocked = True
+                info.block_detail = f"bot_protection status={result.status_code or 403} via={result.via}"
+                ctx.errors.append(f"sitemap blocked: {info.block_detail}")
+            elif result.status_code == 200 and result.text.strip():
+                if _looks_like_sitemap(result.text) or not _is_challenge_body(result.text):
+                    info.exists = True
+                    self._parse_sitemap_xml(result.text, info)
+                    if info.url_count == 0 and not _looks_like_sitemap(result.text):
+                        info.exists = False
+        except Exception:
+            pass
+        ctx.sitemap = info
 
     def _sitemap_url_from_robots(self, ctx: PageContext) -> str:
         """Return the first Sitemap: directive in robots.txt, if any."""
@@ -683,9 +1076,12 @@ class Fetcher:
         statuses = await asyncio.gather(*(self._status(u) for u in sample))
         ctx.link_status = dict(zip(sample, statuses))
         for url, status in ctx.link_status.items():
+            if status == STATUS_BOT_BLOCKED or status in _BOT_SOFT_BLOCK_STATUSES:
+                # Bot protection blocked verification — not a real site 4xx/5xx.
+                continue
             if status == 0:
                 ctx.crawl_failures.append({"url": url, "reason": "unreachable"})
-            elif status >= 400:
+            elif is_reportable_http_error(status):
                 ctx.crawl_failures.append({"url": url, "reason": f"http_{status}"})
 
         frontier: list[tuple[str, int]] = [(url, 1) for url in home_outlinks]
@@ -706,7 +1102,12 @@ class Fetcher:
             else:
                 status, html = await self._fetch_crawl_snippet(current)
                 ctx.crawl_page_status[current] = status
-                if status == 0 or status >= 400 or not html:
+                if (
+                    status == STATUS_BOT_BLOCKED
+                    or status == 0
+                    or status >= 400
+                    or not html
+                ):
                     ctx.crawled_outlinks[current] = []
                     continue
                 soup = BeautifulSoup(html, "lxml")
@@ -733,32 +1134,87 @@ class Fetcher:
         ctx.internal_inlink_counts = inlinks
 
     async def _fetch_crawl_snippet(self, url: str) -> tuple[int, str]:
-        """Fetch the first ~16 KB of HTML for shallow-crawl link/title parsing."""
+        """Fetch HTML for shallow-crawl link/title parsing (with CF bypass on origin).
+
+        Firecrawl is not used here — it would spray paid scrapes across the BFS.
+        Critical resources (main/robots/sitemap) already escalate to Firecrawl in `_get`.
+        """
         try:
+            if self._is_audited_url(url):
+                result = await self._get(url, allow_firecrawl=False)
+                status = _origin_probe_status(
+                    result.status_code,
+                    result.text,
+                    result.headers,
+                    blocked=result.blocked,
+                )
+                if status == STATUS_BOT_BLOCKED or status == 0:
+                    return status, ""
+                if status >= 400 or not result.text:
+                    return status, ""
+                return status or 200, result.text[:16384]
             response = await self._http.get(url, headers={"Range": "bytes=0-16384"})
             return response.status_code, response.text if response.status_code < 400 else ""
         except Exception:
             return 0, ""
 
-    async def _status(self, url: str) -> int:
-        """Return the HTTP status code for a URL (0 on failure), preferring HEAD."""
-        try:  # Network call may fail
-            response = await self._http.head(url)  # Light HEAD request
-            if response.status_code >= 400:  # Some servers disallow HEAD
-                response = await self._http.get(url, headers={"Range": "bytes=0-0"})  # Minimal GET
-            return response.status_code  # Resolved status
-        except Exception:  # Any error
-            return 0  # Unknown status
-
-    async def _status_with_headers(self, url: str) -> tuple[int, dict[str, str]]:
-        """Return status code and lower-cased headers for a URL."""
+    async def _httpx_status_with_headers(self, url: str) -> tuple[int, dict[str, str], str]:
+        """HEAD/GET via httpx; returns status, headers, and a short body sample."""
         try:
             response = await self._http.head(url)
-            if response.status_code >= 400:
-                response = await self._http.get(url, headers={"Range": "bytes=0-0"})
-            return response.status_code, {k.lower(): v for k, v in response.headers.items()}
+            text = ""
+            if response.status_code >= 400 or _is_challenge_response(
+                response.status_code, "", {k.lower(): v for k, v in response.headers.items()}
+            ):
+                response = await self._http.get(url, headers={"Range": "bytes=0-2048"})
+                text = response.text
+            headers = {k.lower(): v for k, v in response.headers.items()}
+            return response.status_code, headers, text
         except Exception:
-            return 0, {}
+            return 0, {}, ""
+
+    async def _status(self, url: str) -> int:
+        """Return the HTTP status code for a URL (0 on failure), preferring HEAD."""
+        status, _headers = await self._status_with_headers(url)
+        return status
+
+    async def _status_with_headers(self, url: str) -> tuple[int, dict[str, str]]:
+        """Return status code and lower-cased headers for a URL (CF bypass on origin).
+
+        When the audited origin is behind a bot challenge we cannot clear, return
+        STATUS_BOT_BLOCKED instead of a raw 403/503 so reports do not treat
+        Cloudflare blocks as real broken pages.
+        """
+        status, headers, text = await self._httpx_status_with_headers(url)
+        if not self._is_audited_url(url):
+            return status, headers
+
+        # Real page errors (404/410/5xx that are not soft-blocks) pass through.
+        if (
+            status
+            and status not in _BOT_SOFT_BLOCK_STATUSES
+            and not _is_challenge_response(status, text, headers)
+        ):
+            return status, headers
+
+        # Soft-block / challenge — escalate via Playwright request API.
+        if self._settings.enable_playwright and not self._pw_skip:
+            result = await self._playwright_request(url)
+            normalized = _origin_probe_status(
+                result.status_code,
+                result.text,
+                result.headers or headers,
+                blocked=result.blocked,
+            )
+            if normalized == STATUS_BOT_BLOCKED:
+                return STATUS_BOT_BLOCKED, result.headers or headers
+            if normalized and normalized not in _BOT_SOFT_BLOCK_STATUSES:
+                return normalized, result.headers or headers
+
+        return (
+            _origin_probe_status(status, text, headers, blocked=True),
+            headers,
+        )
 
     async def _supplementary_probes(self, ctx: PageContext) -> None:
         """Run asset, TLS, WWW, sitemap and robots cross-checks for site audit params."""
@@ -802,7 +1258,7 @@ class Fetcher:
 
         for url, status in ctx.asset_status.items():
             host = registrable_host(urlparse(url).netloc)
-            if host == page_host and status >= 400:
+            if host == page_host and is_reportable_http_error(status):
                 ctx.crawl_failures.append({"url": url, "reason": f"asset_http_{status}"})
 
     async def _probe_external_links(self, ctx: PageContext) -> None:
@@ -819,15 +1275,15 @@ class Fetcher:
             return
         http_url = f"http://{host}/"
         try:
-            response = await self._http.get(http_url, follow_redirects=True)
-            final = str(response.url)
+            result = await self._get(http_url, allow_firecrawl=True)
+            final = result.final_url or http_url
             if final.startswith("https://"):
                 ctx.http_homepage_https_ok = True
                 ctx.http_homepage_detail = f"redirects to {final}"
                 return
-            html = response.text[:8000] if response.status_code < 400 else ""
+            html = result.text[:8000] if (result.status_code or 0) < 400 else ""
             canonical = ""
-            if html:
+            if html and not _is_challenge_body(html):
                 soup = BeautifulSoup(html, "lxml")
                 tag = soup.find("link", rel=lambda v: v and "canonical" in v.lower())
                 if tag and tag.get("href"):
@@ -837,7 +1293,10 @@ class Fetcher:
                 ctx.http_homepage_detail = f"canonical={canonical}"
             else:
                 ctx.http_homepage_https_ok = False
-                ctx.http_homepage_detail = f"final={final}, canonical={canonical or 'missing'}"
+                detail = f"final={final}, canonical={canonical or 'missing'}"
+                if result.blocked:
+                    detail += "; bot_protection"
+                ctx.http_homepage_detail = detail
         except Exception as exc:
             ctx.http_homepage_https_ok = False
             ctx.http_homepage_detail = f"fetch failed: {exc}"
@@ -848,7 +1307,7 @@ class Fetcher:
 
         async def fetch_title(url: str) -> None:
             status, html = await self._fetch_crawl_snippet(url)
-            if status >= 400 or not html:
+            if status == STATUS_BOT_BLOCKED or status == 0 or status >= 400 or not html:
                 return
             soup = BeautifulSoup(html, "lxml")
             title_tag = soup.find("title")
@@ -870,8 +1329,8 @@ class Fetcher:
             alt_host = f"www.{host}"
         alt_url = f"{parsed.scheme}://{alt_host}/"
         try:
-            response = await self._http.get(alt_url, follow_redirects=True)
-            final_host = urlparse(str(response.url)).netloc.lower()
+            result = await self._get(alt_url, allow_firecrawl=True)
+            final_host = urlparse(result.final_url or alt_url).netloc.lower()
             ctx.www_resolve_ok = registrable_host(final_host) == registrable_host(host)
         except Exception:
             ctx.www_resolve_ok = False

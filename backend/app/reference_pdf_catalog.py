@@ -68,8 +68,8 @@ BASELINE_PARAMS: list[RefParameter] = [
 
 SITE_AUDIT_FULL_PARAMS: list[RefParameter] = [
     _o("Internal Link Distribution", ("Internal link distribution",), "Requires inlink graph from multi-page crawl."),
-    _s("Pages returned 5XX status code", "Errors", ("Broken links", "HTTP status & redirects"), "Requires full-site crawl status inventory."),
-    _s("Pages returned 4XX status code", "Errors", ("Broken links",), "Requires full-site 4XX page inventory."),
+    _s("Pages returned 5XX status code", "Errors", ("Pages returned 5XX status code",), "Requires full-site crawl status inventory."),
+    _s("Pages returned 4XX status code", "Errors", ("Pages returned 4XX status code",), "Requires full-site 4XX page inventory."),
     _s("Pages don't have title tags", "Errors", ("Title tag",), "Single-page crawl only when not calculated."),
     _s("Issues with duplicate title tags", "Errors", ("Title tag",), "Requires cross-site title deduplication."),
     _s("Pages have duplicate content issues", "Errors", ("Duplicate content",), "Requires site-wide near-duplicate fingerprinting."),
@@ -189,8 +189,8 @@ CATALOG_BY_PDF: dict[str, list[RefParameter]] = {
 
 PDF_TITLES: dict[str, str] = {
     "performance_baseline": "Performance Baseline — Traffic, Engagement, SEO & Web Vitals",
-    "site_audit_full": "Heuristics AI — Full Site Audit",
-    "ai_search_overview": "Heuristics AI — AI Search Overview",
+    "site_audit_full": "Full Site Audit Report",
+    "ai_search_overview": "Site Audit: Overview",
 }
 
 PDF_FILENAMES: dict[str, str] = {
